@@ -730,6 +730,26 @@ def with_rerun(callback: Callable[..., None], *args, **kwargs) -> Callable[[], N
     return _inner
 
 
+def safe_popover(label: str, **kwargs):
+    """Open a popover when available, otherwise fall back gracefully."""
+
+    popover = getattr(st, "popover", None)
+    if callable(popover):
+        try:
+            return popover(label, **kwargs)
+        except TypeError:
+            filtered_kwargs = {
+                key: value for key, value in kwargs.items() if key != "use_container_width"
+            }
+            try:
+                return popover(label, **filtered_kwargs)
+            except TypeError:
+                pass
+
+    expanded = kwargs.get("expanded", False)
+    return st.expander(label, expanded=expanded)
+
+
 def handle_nav_change() -> None:
     st.session_state["nav"] = st.session_state.get("_nav_widget", "ホーム")
 
@@ -4995,7 +5015,7 @@ def render_question_interaction(
     with caption_cols[0]:
         st.caption("キーボードショートカットは「❓ ショートカット」から確認できます。Hキーでも開閉できます。")
     with caption_cols[1]:
-        with st.popover(
+        with safe_popover(
             shortcut_help_label,
             key=f"{key_prefix}_shortcut_help_{row['id']}",
             use_container_width=True,
