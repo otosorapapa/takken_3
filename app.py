@@ -12,6 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
+import textwrap
 from typing import (TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set,
                     Tuple)
 from urllib.parse import quote_plus
@@ -61,6 +62,39 @@ DEFAULT_CATEGORY_MAP = {
     "税・その他": "税・その他",
     "税その他": "税・その他",
 }
+
+
+def render_app_card_grid(cards: Sequence[Dict[str, object]]) -> None:
+    """Render summary cards using the shared "app-card" styling."""
+
+    if not cards:
+        return
+
+    card_html = "".join(
+        textwrap.dedent(
+            f"""
+            <div class=\"app-card\">
+                <div class=\"app-card-title\">{html_module.escape(str(card.get('title', '')))}
+                </div>
+                <div class=\"app-card-value\">{html_module.escape(str(card.get('value', '')))}
+                </div>
+                <div class=\"app-card-caption\">{html_module.escape(str(card.get('caption', '')))}
+                </div>
+            </div>
+            """
+        ).strip()
+        for card in cards
+    )
+    st.markdown(
+        textwrap.dedent(
+            f"""
+            <div class=\"app-card-grid\">
+            {card_html}
+            </div>
+            """
+        ).strip(),
+        unsafe_allow_html=True,
+    )
 CATEGORY_CHOICES = ["宅建業法", "権利関係", "法令上の制限", "税・その他"]
 DIFFICULTY_DEFAULT = 3
 LAW_REFERENCE_BASE_URL = "https://elaws.e-gov.go.jp/search?q={query}"
@@ -3503,20 +3537,7 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
             "caption": "学習済みの年度比率",
         },
     ]
-    summary_html = "".join(
-        f"""
-        <div class=\"app-card\">
-            <div class=\"app-card-title\">{card['title']}</div>
-            <div class=\"app-card-value\">{card['value']}</div>
-            <div class=\"app-card-caption\">{card['caption']}</div>
-        </div>
-        """
-        for card in summary_cards
-    )
-    st.markdown(
-        f"<div class=\"app-card-grid\">{summary_html}</div>",
-        unsafe_allow_html=True,
-    )
+    render_app_card_grid(summary_cards)
 
     guide_items = "".join(f"<li>{html_module.escape(point)}</li>" for point in CSV_IMPORT_GUIDE_POINTS)
     st.markdown(
@@ -4783,20 +4804,7 @@ def display_exam_result(result: Dict[str, object]) -> None:
             "caption": "残余時間とペースから推計",
         },
     ]
-    summary_html = "".join(
-        f"""
-        <div class=\"app-card\">
-            <div class=\"app-card-title\">{card['title']}</div>
-            <div class=\"app-card-value\">{card['value']}</div>
-            <div class=\"app-card-caption\">{card['caption']}</div>
-        </div>
-        """
-        for card in summary_cards
-    )
-    st.markdown(
-        f"<div class=\"app-card-grid\">{summary_html}</div>",
-        unsafe_allow_html=True,
-    )
+    render_app_card_grid(summary_cards)
     st.progress(min(accuracy / max(pass_line, 1e-6), 1.0))
     if result["per_category"]:
         radar_df = pd.DataFrame(
@@ -5551,20 +5559,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             "caption": "自己評価スライダーの平均値",
         },
     ]
-    summary_html = "".join(
-        f"""
-        <div class=\"app-card\">
-            <div class=\"app-card-title\">{card['title']}</div>
-            <div class=\"app-card-value\">{card['value']}</div>
-            <div class=\"app-card-caption\">{card['caption']}</div>
-        </div>
-        """
-        for card in summary_cards
-    )
-    st.markdown(
-        f"<div class=\"app-card-grid\">{summary_html}</div>",
-        unsafe_allow_html=True,
-    )
+    render_app_card_grid(summary_cards)
 
     import altair as alt
 
