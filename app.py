@@ -2348,6 +2348,152 @@ def inject_ui_styles() -> None:
 .takken-feedback-summary strong {
     font-weight: 600;
 }
+.app-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin: 1rem 0 1.5rem;
+}
+.app-card {
+    background: rgba(49, 51, 63, 0.03);
+    border: 1px solid rgba(49, 51, 63, 0.08);
+    border-radius: 0.9rem;
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.app-card-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: rgba(49, 51, 63, 0.75);
+    letter-spacing: 0.01em;
+}
+.app-card-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+.app-card-caption {
+    font-size: 0.85rem;
+    color: rgba(49, 51, 63, 0.6);
+}
+.app-question-card {
+    background: #ffffff;
+    border-radius: 1rem;
+    border: 1px solid rgba(49, 51, 63, 0.1);
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+.app-question-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.95rem;
+    color: rgba(15, 23, 42, 0.75);
+}
+.app-question-meta strong {
+    font-weight: 600;
+}
+.app-question-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.75rem;
+}
+.app-question-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+}
+.app-question-actions .stButton button {
+    min-width: 140px;
+}
+.app-section-card {
+    background: rgba(49, 51, 63, 0.02);
+    border: 1px solid rgba(49, 51, 63, 0.07);
+    border-radius: 1rem;
+    padding: 1.5rem;
+}
+.app-section-card + .app-section-card {
+    margin-top: 1.25rem;
+}
+.app-inline-kv {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.app-inline-kv strong {
+    font-size: 1.1rem;
+}
+.app-inline-kv span {
+    font-size: 0.9rem;
+    color: rgba(49, 51, 63, 0.65);
+}
+.app-fluid-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+}
+.app-fluid-grid > * {
+    height: 100%;
+}
+.app-chart-container {
+    padding: 1rem;
+    border-radius: 1rem;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: rgba(15, 23, 42, 0.02);
+}
+.app-chart-container h4 {
+    margin-top: 0;
+}
+@media (max-width: 1100px) {
+    .block-container {
+        padding-left: 1.25rem !important;
+        padding-right: 1.25rem !important;
+    }
+}
+@media (max-width: 900px) {
+    .block-container {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+    .app-card-value {
+        font-size: 1.4rem;
+    }
+    [data-testid="stHorizontalBlock"] {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0.75rem !important;
+    }
+    [data-testid="stHorizontalBlock"] > div {
+        width: 100% !important;
+    }
+    .app-question-options {
+        grid-template-columns: 1fr;
+    }
+    .app-question-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .app-question-actions .stButton button {
+        width: 100%;
+    }
+}
+@media (max-width: 640px) {
+    .block-container {
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+    }
+    .app-card-grid {
+        grid-template-columns: 1fr;
+    }
+}
 """,
         "takken-ui-styles",
     )
@@ -3298,14 +3444,44 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
 
     attempts = db.get_attempt_stats()
     st.markdown("### サマリー")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("設問数", len(df))
-    with col2:
-        st.metric("学習履歴", len(attempts))
-    with col3:
-        coverage = attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
-        st.metric("年度カバレッジ", f"{coverage:.0f}%")
+    total_questions = len(df)
+    attempt_count = len(attempts)
+    coverage = (
+        attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100
+        if not attempts.empty
+        else 0
+    )
+    summary_cards = [
+        {
+            "title": "設問数",
+            "value": f"{total_questions:,}",
+            "caption": "登録済みの設問件数",
+        },
+        {
+            "title": "学習履歴",
+            "value": f"{attempt_count:,}",
+            "caption": "記録された挑戦回数",
+        },
+        {
+            "title": "年度カバレッジ",
+            "value": f"{coverage:.0f}%",
+            "caption": "学習済みの年度比率",
+        },
+    ]
+    summary_html = "".join(
+        f"""
+        <div class=\"app-card\">
+            <div class=\"app-card-title\">{card['title']}</div>
+            <div class=\"app-card-value\">{card['value']}</div>
+            <div class=\"app-card-caption\">{card['caption']}</div>
+        </div>
+        """
+        for card in summary_cards
+    )
+    st.markdown(
+        f"<div class=\"app-card-grid\">{summary_html}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown(
         """
@@ -4404,25 +4580,51 @@ def render_exam_session_body(
         if row_df.empty:
             continue
         row = row_df.iloc[0]
-        st.markdown(f"### {row['year']}年 問{row['q_no']}")
-        st.markdown(f"**{row['category']} / {row['topic']}**")
-        render_law_reference(row, db=db)
-        st.markdown(row["question"], unsafe_allow_html=True)
-        options = [row.get(f"choice{i}", "") for i in range(1, 5)]
-        option_map = {
-            idx + 1: f"{choice_labels[idx]} {options[idx]}" if options[idx] else choice_labels[idx]
-            for idx in range(4)
-        }
-        choice = st.radio(
-            f"回答 ({qid})",
-            list(option_map.keys()),
-            format_func=lambda opt: option_map.get(opt, str(opt)),
-            key=f"{key_prefix}_exam_{qid}",
-            horizontal=True,
-            index=None,
-        )
-        if choice is not None:
-            responses[qid] = choice
+        year_text = format_year_value(row.get("year")) or "年度不明"
+        qno_text = format_qno_value(row.get("q_no")) or "?"
+        category_text = html_module.escape(str(row.get("category") or "分野未登録"))
+        topic_raw = row.get("topic")
+        if pd.notna(topic_raw) and str(topic_raw).strip():
+            topic_text = html_module.escape(str(topic_raw))
+        else:
+            topic_text = "テーマ未設定"
+        question_value = row.get("question")
+        if pd.isna(question_value):
+            question_body = ""
+        else:
+            question_body = str(question_value)
+        question_container = st.container()
+        with question_container:
+            question_container.markdown(
+                f"""
+                <div class=\"app-question-card\">
+                    <div class=\"app-question-meta\">
+                        <span><strong>{year_text}</strong> 問{qno_text}</span>
+                        <span>{category_text}</span>
+                        <span>{topic_text}</span>
+                    </div>
+                    <div class=\"app-question-body\">{question_body}</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            render_law_reference(row, db=db)
+            options = [row.get(f"choice{i}", "") for i in range(1, 5)]
+            option_map = {
+                idx + 1: f"{choice_labels[idx]} {options[idx]}" if options[idx] else choice_labels[idx]
+                for idx in range(4)
+            }
+            choice = question_container.radio(
+                f"回答 ({qid})",
+                list(option_map.keys()),
+                format_func=lambda opt: option_map.get(opt, str(opt)),
+                key=f"{key_prefix}_exam_{qid}",
+                horizontal=False,
+                index=None,
+                label_visibility="collapsed",
+            )
+            if choice is not None:
+                responses[qid] = choice
+            question_container.markdown("</div>", unsafe_allow_html=True)
     if st.button(
         "採点する",
         key=f"{key_prefix}_grade",
@@ -4519,20 +4721,45 @@ def display_exam_result(result: Dict[str, object]) -> None:
     pass_line = result["pass_line"]
     status = "✅ 合格ライン到達" if accuracy >= pass_line else "⚠️ 合格ライン未達"
     st.markdown(f"### 採点結果 — {status}")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("得点", f"{score} / {total}")
-    with col2:
-        st.metric("正答率", f"{accuracy * 100:.1f}%")
-    with col3:
-        threshold = int(total * pass_line)
-        st.metric("合格ライン", f"{threshold} 点")
-    st.progress(min(accuracy / max(pass_line, 1e-6), 1.0))
+    threshold = int(total * pass_line)
     remaining_minutes, remaining_seconds = divmod(int(result["remaining_time"]), 60)
-    st.metric(
-        "残り時間 × 想定到達点",
-        f"{remaining_minutes:02d}:{remaining_seconds:02d} / {result['expected_final']:.1f} 点",
+    summary_cards = [
+        {
+            "title": "得点",
+            "value": f"{score} / {total}",
+            "caption": "今回の獲得点数",
+        },
+        {
+            "title": "正答率",
+            "value": f"{accuracy * 100:.1f}%",
+            "caption": "正解割合",
+        },
+        {
+            "title": "合格ライン",
+            "value": f"{threshold} 点",
+            "caption": f"合格基準 ({pass_line * 100:.0f}% 相当)",
+        },
+        {
+            "title": "残り時間 / 想定到達点",
+            "value": f"{remaining_minutes:02d}:{remaining_seconds:02d} ／ {result['expected_final']:.1f}点",
+            "caption": "残余時間とペースから推計",
+        },
+    ]
+    summary_html = "".join(
+        f"""
+        <div class=\"app-card\">
+            <div class=\"app-card-title\">{card['title']}</div>
+            <div class=\"app-card-value\">{card['value']}</div>
+            <div class=\"app-card-caption\">{card['caption']}</div>
+        </div>
+        """
+        for card in summary_cards
     )
+    st.markdown(
+        f"<div class=\"app-card-grid\">{summary_html}</div>",
+        unsafe_allow_html=True,
+    )
+    st.progress(min(accuracy / max(pass_line, 1e-6), 1.0))
     if result["per_category"]:
         radar_df = pd.DataFrame(
             [
@@ -4554,7 +4781,7 @@ def display_exam_result(result: Dict[str, object]) -> None:
                     theta=alt.Theta("category", sort=None),
                     radius=alt.Radius("accuracy", scale=alt.Scale(domain=[0, 1])),
                 )
-                .properties(title="分野別スコアレーダー")
+                .properties(title="分野別スコアレーダー", width="container")
             )
             points = (
                 alt.Chart(radar_df)
@@ -4563,8 +4790,10 @@ def display_exam_result(result: Dict[str, object]) -> None:
                     theta=alt.Theta("category", sort=None),
                     radius=alt.Radius("accuracy", scale=alt.Scale(domain=[0, 1])),
                 )
+                .properties(width="container")
             )
-            st.altair_chart(chart + points, use_container_width=True)
+            radar_chart = (chart + points).configure_view(strokeWidth=0)
+            st.altair_chart(radar_chart, use_container_width=True)
     wrong_choices = result.get("wrong_choices", [])
     if wrong_choices:
         st.markdown("#### 誤答の代替正解肢傾向")
@@ -5255,18 +5484,45 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
     avg_seconds = seconds_series.mean() if not seconds_series.empty else np.nan
     avg_confidence = confidence_series.mean() if not confidence_series.empty else np.nan
     st.subheader("サマリー")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("挑戦回数", f"{len(filtered)} 回")
-    with col2:
-        accuracy_text = f"{accuracy * 100:.1f}%" if not np.isnan(accuracy) else "--"
-        st.metric("平均正答率", accuracy_text)
-    with col3:
-        st.metric("平均解答時間", f"{avg_seconds:.1f} 秒" if not np.isnan(avg_seconds) else "--")
-    if not np.isnan(avg_confidence):
-        st.caption(f"平均確信度: {avg_confidence:.1f}%")
-    else:
-        st.caption("平均確信度: -- (十分なデータがありません)")
+    accuracy_text = f"{accuracy * 100:.1f}%" if not np.isnan(accuracy) else "--"
+    seconds_text = f"{avg_seconds:.1f} 秒" if not np.isnan(avg_seconds) else "--"
+    confidence_text = f"{avg_confidence:.1f}%" if not np.isnan(avg_confidence) else "--"
+    summary_cards = [
+        {
+            "title": "挑戦回数",
+            "value": f"{len(filtered):,} 回",
+            "caption": "フィルタ適用後の挑戦数",
+        },
+        {
+            "title": "平均正答率",
+            "value": accuracy_text,
+            "caption": "正解割合の平均値",
+        },
+        {
+            "title": "平均解答時間",
+            "value": seconds_text,
+            "caption": "1問あたりの平均秒数",
+        },
+        {
+            "title": "平均確信度",
+            "value": confidence_text,
+            "caption": "自己評価スライダーの平均値",
+        },
+    ]
+    summary_html = "".join(
+        f"""
+        <div class=\"app-card\">
+            <div class=\"app-card-title\">{card['title']}</div>
+            <div class=\"app-card-value\">{card['value']}</div>
+            <div class=\"app-card-caption\">{card['caption']}</div>
+        </div>
+        """
+        for card in summary_cards
+    )
+    st.markdown(
+        f"<div class=\"app-card-grid\">{summary_html}</div>",
+        unsafe_allow_html=True,
+    )
 
     import altair as alt
 
@@ -5307,7 +5563,12 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             minutes_layer = time_base.mark_line(point=True, color="#f97316").encode(
                 y=alt.Y("学習時間 (分):Q", title="学習時間 (分)", axis=alt.Axis(titleColor="#f97316"))
             )
-            time_chart = alt.layer(attempts_layer, minutes_layer).resolve_scale(y="independent")
+            time_chart = (
+                alt.layer(attempts_layer, minutes_layer)
+                .resolve_scale(y="independent")
+                .properties(width="container")
+                .configure_view(strokeWidth=0)
+            )
             st.altair_chart(time_chart, use_container_width=True)
         except Exception as exc:
             st.warning(f"学習時間の推移グラフを表示できませんでした ({exc})")
@@ -5335,14 +5596,15 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     y=alt.Y("accuracy", title="正答率", axis=alt.Axis(format="%")),
                     tooltip=["category", alt.Tooltip("accuracy", format=".2%"), "attempts_count"],
                 )
-                .properties(height=320)
+                .properties(height=320, width="container")
+                .configure_view(strokeWidth=0)
             )
             st.altair_chart(accuracy_chart, use_container_width=True)
         except Exception as exc:
             st.warning(f"分野別正答率グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
         try:
-            time_chart = (
+            category_time_chart = (
                 alt.Chart(category_stats)
                 .mark_line(point=True)
                 .encode(
@@ -5350,8 +5612,10 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     y=alt.Y("avg_seconds", title="平均解答時間 (秒)", scale=alt.Scale(zero=False)),
                     tooltip=["category", alt.Tooltip("avg_seconds", format=".1f"), "attempts_count"],
                 )
+                .properties(width="container")
+                .configure_view(strokeWidth=0)
             )
-            st.altair_chart(time_chart, use_container_width=True)
+            st.altair_chart(category_time_chart, use_container_width=True)
         except Exception as exc:
             st.warning(f"分野別時間グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -5401,6 +5665,8 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     color=alt.Color("category", legend=None),
                     tooltip=["category", "topic", "confidence", "is_correct", "seconds"],
                 )
+                .properties(width="container")
+                .configure_view(strokeWidth=0)
             )
             st.altair_chart(scatter, use_container_width=True)
         except Exception as exc:
@@ -5425,6 +5691,8 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     color=alt.Color("count", title="誤答回数", scale=alt.Scale(scheme="reds")),
                     tooltip=["word", "category", "count"],
                 )
+                .properties(width="container")
+                .configure_view(strokeWidth=0)
             )
             st.altair_chart(heatmap, use_container_width=True)
         except Exception as exc:
