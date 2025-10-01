@@ -62,7 +62,6 @@ DEFAULT_CATEGORY_MAP = {
 }
 CATEGORY_CHOICES = ["宅建業法", "権利関係", "法令上の制限", "税・その他"]
 DIFFICULTY_DEFAULT = 3
-LAW_BASELINE_LABEL = "適用法令基準日（R6/4/1）"
 LAW_REFERENCE_BASE_URL = "https://elaws.e-gov.go.jp/search?q={query}"
 
 LAW_NAME_SUFFIXES = (
@@ -4745,23 +4744,12 @@ def render_law_reference(row: pd.Series, db: Optional[DBManager] = None) -> None
     insight = get_outline_insight(row)
     terms = insight.get("terms", [])
     query: Optional[str] = " ".join(terms) if terms else None
-    caption_parts = [LAW_BASELINE_LABEL]
+    caption_parts: List[str] = []
     if query:
         url = LAW_REFERENCE_BASE_URL.format(query=quote_plus(query))
         caption_parts.append(f"[条文検索]({url})")
-    st.caption(" ｜ ".join(caption_parts))
-    summary = insight.get("summary")
-    if summary:
-        st.caption(f"要約: {summary}")
-    references = insight.get("references", [])
-    if references:
-        links = [
-            f"[{ref.get('label', '')}]({ref.get('url', '')})"
-            for ref in references
-            if ref.get("label") and ref.get("url")
-        ]
-        if links:
-            st.caption(f"関連: {' / '.join(links)}")
+    if caption_parts:
+        st.caption(" ｜ ".join(caption_parts))
 
 
 def render_law_revision_metadata(row: pd.Series) -> None:
