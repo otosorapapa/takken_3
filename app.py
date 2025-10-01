@@ -2462,8 +2462,7 @@ def parse_explanation_sections(text: str) -> Tuple[str, List[Tuple[str, str]]]:
     if not text:
         return "", []
     lines = [line.strip() for line in str(text).splitlines() if line.strip()]
-    sections: List[Tuple[str, str]] = []
-    summary = ""
+    parsed: List[Tuple[str, str]] = []
     for line in lines:
         match = re.match(r"^【([^】]+)】(.*)$", line)
         if match:
@@ -2472,15 +2471,23 @@ def parse_explanation_sections(text: str) -> Tuple[str, List[Tuple[str, str]]]:
         else:
             label = "補足"
             content = line.strip()
-        sections.append((label, content))
-        if not summary and label in ("要点", "結論") and content:
+        parsed.append((label, content))
+    summary = ""
+    detail_sections: List[Tuple[str, str]] = []
+    summary_labels = {"要点", "結論", "ポイント", "概要"}
+    for label, content in parsed:
+        if not summary and label in summary_labels and content:
             summary = content
-    if not summary and lines:
-        summary = lines[0]
+            continue
+        detail_sections.append((label, content))
+    if not summary and parsed:
+        _, first_content = parsed[0]
+        summary = first_content
+        detail_sections = parsed[1:]
     summary = summary.strip()
     if len(summary) > 80:
         summary = summary[:77] + "…"
-    return summary, sections
+    return summary, detail_sections
 
 
 def normalize_law_reference_label(value: object) -> Optional[str]:
@@ -2625,9 +2632,14 @@ def get_outline_insight(row: pd.Series) -> Dict[str, object]:
     return insight
 
 
-def render_explanation_content(row: pd.Series, db: Optional[DBManager] = None) -> None:
+def render_explanation_content(
+    row: pd.Series,
+    db: Optional[DBManager] = None,
+    *,
+    show_summary: bool = True,
+) -> None:
     explanation = row.get("explanation", "")
-    explanation_summary, sections = parse_explanation_sections(explanation)
+    explanation_summary, detail_sections = parse_explanation_sections(explanation)
     outline = get_outline_insight(row)
     outline_summary = outline.get("summary") or explanation_summary
     references: List[Dict[str, str]] = outline.get("references", [])  # type: ignore[arg-type]
@@ -2713,9 +2725,14 @@ def render_explanation_content(row: pd.Series, db: Optional[DBManager] = None) -
         st.write("解説が未登録です。『設定 ＞ データ入出力』から解答データを取り込みましょう。")
         return
 
-    st.markdown(f"**要点版**：{explanation_summary}")
-    with st.expander("詳細解説をひらく", expanded=False):
-        for label, content in sections:
+    if show_summary and explanation_summary:
+        st.markdown(f"**要点版**：{explanation_summary}")
+    elif explanation_summary:
+        st.caption(f"要点版：{explanation_summary}")
+
+    if detail_sections:
+        st.markdown("##### 詳細解説")
+        for label, content in detail_sections:
             if not content:
                 continue
             if label == "ミニ図":
@@ -2723,24 +2740,27 @@ def render_explanation_content(row: pd.Series, db: Optional[DBManager] = None) -
                 st.markdown(content, unsafe_allow_html=True)
             else:
                 st.markdown(f"- **{label}**：{content}")
-        similar = compute_similarity(row["id"])
-        if not similar.empty:
-            st.markdown("#### 類似問題")
-            st.dataframe(similar, use_container_width=True)
-            questions_df = load_questions_df()
-            similar_ids = [qid for qid in similar["id"] if pd.notna(qid)]
-            if similar_ids:
-                selected_similar_id = st.selectbox(
-                    "類似問題をプレビュー",
-                    similar_ids,
-                    format_func=lambda x: format_question_label(questions_df, x),
-                    key=f"similar_preview_{row['id']}",
-                )
-                preview_row = questions_df[questions_df["id"] == selected_similar_id]
-                if preview_row.empty:
-                    st.info("選択した問題がデータベースに見つかりません。")
-                else:
-                    render_question_preview(preview_row.iloc[0], db=db)
+    elif explanation_summary:
+        st.caption("詳細な解説は登録されていません。要点版のみの提供です。")
+
+    similar = compute_similarity(row["id"])
+    if not similar.empty:
+        st.markdown("#### 類似問題")
+        st.dataframe(similar, use_container_width=True)
+        questions_df = load_questions_df()
+        similar_ids = [qid for qid in similar["id"] if pd.notna(qid)]
+        if similar_ids:
+            selected_similar_id = st.selectbox(
+                "類似問題をプレビュー",
+                similar_ids,
+                format_func=lambda x: format_question_label(questions_df, x),
+                key=f"similar_preview_{row['id']}",
+            )
+            preview_row = questions_df[questions_df["id"] == selected_similar_id]
+            if preview_row.empty:
+                st.info("選択した問題がデータベースに見つかりません。")
+            else:
+                render_question_preview(preview_row.iloc[0], db=db)
 
 
 def estimate_theta(attempts: pd.DataFrame, df: pd.DataFrame) -> Optional[float]:
@@ -4595,6 +4615,7 @@ def render_question_interaction(
     explanation_key = f"{key_prefix}_explanation_{row['id']}"
     confidence_key = f"{key_prefix}_confidence_{row['id']}"
     help_state_key = f"{key_prefix}_help_visible"
+    hint_key = f"{key_prefix}_hint_{row['id']}"
     if st.session_state.get(last_question_key) != row["id"]:
         st.session_state[last_question_key] = row["id"]
         st.session_state.pop(feedback_key, None)
@@ -4602,6 +4623,7 @@ def render_question_interaction(
         st.session_state[confidence_key] = 50
         st.session_state[order_key] = None
         st.session_state[explanation_key] = False
+        st.session_state[hint_key] = False
     feedback = st.session_state.get(feedback_key)
     if feedback and feedback.get("question_id") != row["id"]:
         feedback = None
@@ -4643,9 +4665,10 @@ def render_question_interaction(
     graded_selected_choice: Optional[int] = None
     correct_choice_idx: Optional[int] = None
     explanation_summary = ""
+    explanation_sections: List[Tuple[str, str]] = []
     explanation_value = row.get("explanation")
     if pd.notna(explanation_value) and str(explanation_value).strip():
-        explanation_summary, _ = parse_explanation_sections(explanation_value)
+        explanation_summary, explanation_sections = parse_explanation_sections(explanation_value)
     if feedback:
         graded_selected_choice = feedback.get("selected_choice")
         correct_choice = feedback.get("correct_choice")
@@ -4699,7 +4722,7 @@ def render_question_interaction(
                         selected_choice = actual_idx
                         safe_rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
-    st.caption("1〜4キーで選択肢を即答できます。E:解説 F:フラグ N/P:移動 H:ヘルプ R:SRSリセット")
+    st.caption("1〜4キーで選択肢を即答できます。H:ヒント（採点前） E:詳細解説 F:フラグ N/P:移動 /:ヘルプ R:SRSリセット")
     confidence_value = st.session_state.get(confidence_key)
     if confidence_value is None:
         confidence_value = 50
@@ -4712,16 +4735,31 @@ def render_question_interaction(
         value=confidence_value,
         key=confidence_key,
     )
-    show_explanation = st.session_state.get(explanation_key, False)
+    show_explanation = bool(st.session_state.get(explanation_key, False))
+    hint_visible = bool(st.session_state.get(hint_key, False))
     flagged = row["id"] in set(st.session_state.get("review_flags", []))
     grade_label = "採点"
-    explanation_label = "解説を隠す" if show_explanation else "解説を表示"
+    explanation_available = bool(explanation_summary or explanation_sections)
+    hint_enabled = bool(explanation_summary) and not is_graded
+    if hint_visible and not hint_enabled:
+        hint_visible = False
+        st.session_state[hint_key] = False
+    hint_label = "ヒントを隠す" if hint_visible else "ヒント"
+    if not hint_enabled:
+        hint_label = "ヒント（採点前）"
+    if not is_graded and show_explanation:
+        show_explanation = False
+        st.session_state[explanation_key] = False
+    explanation_button_disabled = not (is_graded and explanation_available)
+    explanation_label = "詳細解説を隠す" if show_explanation else "詳細解説を表示"
+    if explanation_button_disabled:
+        explanation_label = "詳細解説（採点後）"
     flag_label = "フラグ解除" if flagged else "復習フラグ"
-    help_label = "ヘルプ"
+    help_visible = st.session_state.get(help_state_key, False)
+    help_label = "ヘルプを隠す" if help_visible else "ヘルプ"
     auto_advance_enabled = st.session_state["settings"].get("auto_advance", False)
     grade_clicked = False
     needs_rerun_after_grade = False
-    help_visible = st.session_state.get(help_state_key, False)
     action_buttons = [
         {
             "id": "grade",
@@ -4730,9 +4768,16 @@ def render_question_interaction(
             "type": "primary",
         },
         {
+            "id": "hint",
+            "label": hint_label,
+            "key": f"{key_prefix}_hint_{row['id']}",
+            "disabled": not hint_enabled,
+        },
+        {
             "id": "toggle_explanation",
             "label": explanation_label,
             "key": f"{key_prefix}_toggle_explanation_{row['id']}",
+            "disabled": explanation_button_disabled,
         },
         {
             "id": "flag",
@@ -4763,10 +4808,19 @@ def render_question_interaction(
             }
             if "type" in action:
                 button_kwargs["type"] = action["type"]
+            if action.get("disabled"):
+                button_kwargs["disabled"] = True
             clicked = st.button(action["label"], **button_kwargs)
             if action["id"] == "grade" and clicked:
                 grade_clicked = True
-            elif action["id"] == "toggle_explanation" and clicked:
+            elif action["id"] == "hint" and clicked and not action.get("disabled"):
+                hint_visible = not hint_visible
+                st.session_state[hint_key] = hint_visible
+            elif (
+                action["id"] == "toggle_explanation"
+                and clicked
+                and not action.get("disabled")
+            ):
                 show_explanation = not show_explanation
                 st.session_state[explanation_key] = show_explanation
             elif action["id"] == "flag" and clicked:
@@ -4794,6 +4848,11 @@ def render_question_interaction(
                 st.success("SRSを初期化しました。明日から復習に再投入されます。")
             st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+    if hint_visible and explanation_summary:
+        hint_html = (
+            f'<div class="takken-feedback-summary">💡 <span>{html_module.escape(explanation_summary)}</span></div>'
+        )
+        st.markdown(hint_html, unsafe_allow_html=True)
     flagged = row["id"] in set(st.session_state.get("review_flags", []))
     help_visible = st.session_state.get(help_state_key, help_visible)
     if auto_advance_enabled and navigation and navigation.has_next:
@@ -4842,6 +4901,11 @@ def render_question_interaction(
                     "selected_choice": selected_choice,
                 }
                 feedback = st.session_state[feedback_key]
+                if explanation_available and not st.session_state.get(explanation_key, False):
+                    st.session_state[explanation_key] = True
+                    show_explanation = True
+                st.session_state[hint_key] = False
+                hint_visible = False
                 if log_attempts:
                     db.record_attempt(
                         row["id"],
@@ -4878,12 +4942,14 @@ def render_question_interaction(
         st.caption(
             f"確信度 {feedback.get('confidence', confidence_value)}% → 復習グレード {feedback.get('grade', '')}"
         )
-    if show_explanation:
+    if show_explanation and is_graded and explanation_available:
         st.markdown("#### 解説")
-        render_explanation_content(row, db=db)
+        render_explanation_content(row, db=db, show_summary=not hint_visible)
+    elif show_explanation and is_graded and not explanation_available:
+        st.info("詳細解説が登録されていません。")
     if help_visible:
         st.info(
-            """ショートカット一覧\n- 1〜4: 選択肢を選ぶ\n- E: 解説の表示/非表示\n- F: 復習フラグの切り替え\n- N/P: 次へ・前へ\n- H: このヘルプ"""
+            """ショートカット一覧\n- 1〜4: 選択肢を選ぶ\n- H: ヒントを表示/隠す（採点前）\n- E: 詳細解説の表示/非表示（採点後）\n- F: 復習フラグの切り替え\n- N/P: 次へ・前へ\n- /: このヘルプ\n- R: SRSリセット"""
         )
     nav_prev_label = "前へ"
     nav_next_label = "次へ"
@@ -4914,9 +4980,12 @@ def render_question_interaction(
     shortcut_map: Dict[str, str] = {}
     for idx, label in enumerate(button_labels[:4]):
         shortcut_map[str(idx + 1)] = label
-    shortcut_map["e"] = explanation_label
+    if not explanation_button_disabled:
+        shortcut_map["e"] = "詳細解説"
+    if hint_enabled:
+        shortcut_map["h"] = "ヒント"
     shortcut_map["f"] = flag_label
-    shortcut_map["h"] = help_label
+    shortcut_map["/"] = "ヘルプ"
     if enable_srs:
         shortcut_map["r"] = "SRSリセット"
     if navigation:
