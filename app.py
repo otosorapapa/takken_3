@@ -1289,12 +1289,17 @@ class DBManager:
         return df
 
     def fetch_outline_notes(self, question_id: Optional[str] = None) -> pd.DataFrame:
-        with self.engine.connect() as conn:
-            stmt = select(outline_notes_table)
-            if question_id:
-                stmt = stmt.where(outline_notes_table.c.question_id == question_id)
-            stmt = stmt.order_by(outline_notes_table.c.updated_at.desc())
-            df = pd.read_sql(stmt, conn)
+        stmt = select(outline_notes_table)
+        if question_id:
+            stmt = stmt.where(outline_notes_table.c.question_id == question_id)
+        stmt = stmt.order_by(outline_notes_table.c.updated_at.desc())
+
+        try:
+            with self.engine.connect() as conn:
+                df = pd.read_sql(stmt, conn)
+        except OperationalError:
+            column_names = [column.name for column in outline_notes_table.columns]
+            return pd.DataFrame(columns=column_names)
         return df
 
     def save_outline_note(
