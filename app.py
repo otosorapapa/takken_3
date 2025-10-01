@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import time
+import traceback
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +101,24 @@ FONT_SIZE_SCALE = {
     "やや大きい": 1.1,
     "大きい": 1.2,
 }
+
+CSV_IMPORT_TUTORIAL_URL = "https://takken.app/videos/csv-import-guide.mp4"
+CSV_IMPORT_GUIDE_POINTS = [
+    "テンプレートZIPから questions.csv / answers.csv をダウンロードする",
+    "年度・問番・問題文などの必須列を埋め、Excel などで保存する",
+    "『設定 ＞ データ入出力』またはホームのクイックインポートでファイルをアップロードする",
+    "バリデーション結果でエラー行を確認し、必要に応じて再修正する",
+    "正常に取り込めたらTF-IDFの再学習や履歴エクスポートを活用する",
+]
+
+
+def build_csv_import_guide_markdown() -> str:
+    bullet_lines = "\n".join(f"- {point}" for point in CSV_IMPORT_GUIDE_POINTS)
+    return (
+        "**CSV取り込みの流れ**\n"
+        f"{bullet_lines}\n\n"
+        f"[動画で手順を確認する]({CSV_IMPORT_TUTORIAL_URL})"
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -1438,10 +1457,15 @@ def compute_similarity(target_id: str, top_n: int = 3) -> pd.DataFrame:
     return df[["id", "year", "q_no", "category", "question", "similarity"]]
 
 
+def apply_column_mapping(df: pd.DataFrame, mapping: Optional[Dict[str, str]]) -> pd.DataFrame:
+    if not mapping:
+        return df.copy()
+    rename_map = {selected: key for key, selected in mapping.items() if selected}
+    return df.rename(columns=rename_map)
+
+
 def normalize_questions(df: pd.DataFrame, mapping: Optional[Dict[str, str]] = None) -> pd.DataFrame:
-    df = df.copy()
-    if mapping:
-        df = df.rename(columns=mapping)
+    df = apply_column_mapping(df, mapping).copy()
     required_cols = [
         "year",
         "q_no",
@@ -1491,9 +1515,7 @@ def normalize_questions(df: pd.DataFrame, mapping: Optional[Dict[str, str]] = No
 
 
 def normalize_answers(df: pd.DataFrame, mapping: Optional[Dict[str, str]] = None) -> pd.DataFrame:
-    df = df.copy()
-    if mapping:
-        df = df.rename(columns=mapping)
+    df = apply_column_mapping(df, mapping).copy()
     if "year" not in df.columns or "q_no" not in df.columns:
         raise ValueError("year と q_no は必須です")
     df["year"] = df["year"].astype(int)
@@ -1520,9 +1542,7 @@ def generate_law_revision_question_id(row: pd.Series) -> str:
 def normalize_predicted_questions(
     df: pd.DataFrame, mapping: Optional[Dict[str, str]] = None
 ) -> pd.DataFrame:
-    df = df.copy()
-    if mapping:
-        df = df.rename(columns=mapping)
+    df = apply_column_mapping(df, mapping).copy()
     required_cols = ["question", "choice1", "choice2", "choice3", "choice4"]
     for col in required_cols:
         if col not in df.columns:
@@ -1580,9 +1600,7 @@ def normalize_predicted_questions(
 def normalize_law_revision_questions(
     df: pd.DataFrame, mapping: Optional[Dict[str, str]] = None
 ) -> pd.DataFrame:
-    df = df.copy()
-    if mapping:
-        df = df.rename(columns=mapping)
+    df = apply_column_mapping(df, mapping).copy()
     required_cols = ["law_name", "question", "choice1", "choice2", "choice3", "choice4"]
     for col in required_cols:
         if col not in df.columns:
@@ -1660,6 +1678,14 @@ def validate_question_records(df: pd.DataFrame) -> List[str]:
         errors.append(f"必須列が不足しています: {', '.join(missing)}")
         return errors
     working = df.reset_index(drop=True)
+    year_numeric = pd.to_numeric(working.get("year"), errors="coerce")
+    if year_numeric.isna().any():
+        rows = ", ".join(map(str, (year_numeric.isna().to_numpy().nonzero()[0] + 2)[:5]))
+        errors.append(f"year に数値以外の値があります (行 {rows})。")
+    qno_numeric = pd.to_numeric(working.get("q_no"), errors="coerce")
+    if qno_numeric.isna().any():
+        rows = ", ".join(map(str, (qno_numeric.isna().to_numpy().nonzero()[0] + 2)[:5]))
+        errors.append(f"q_no に数値以外の値があります (行 {rows})。")
     if "id" in working.columns:
         dup_ids = working[working["id"].notna() & working["id"].duplicated()]["id"].unique()
         if dup_ids.size > 0:
@@ -1695,6 +1721,14 @@ def validate_answer_records(df: pd.DataFrame) -> List[str]:
         errors.append(f"必須列が不足しています: {', '.join(missing)}")
         return errors
     working = df.reset_index(drop=True)
+    year_numeric = pd.to_numeric(working.get("year"), errors="coerce")
+    if year_numeric.isna().any():
+        rows = ", ".join(map(str, (year_numeric.isna().to_numpy().nonzero()[0] + 2)[:5]))
+        errors.append(f"year に数値以外の値があります (行 {rows})。")
+    qno_numeric = pd.to_numeric(working.get("q_no"), errors="coerce")
+    if qno_numeric.isna().any():
+        rows = ", ".join(map(str, (qno_numeric.isna().to_numpy().nonzero()[0] + 2)[:5]))
+        errors.append(f"q_no に数値以外の値があります (行 {rows})。")
     dup_keys = working.duplicated(subset=["year", "q_no"], keep=False)
     if dup_keys.any():
         duplicates = working.loc[dup_keys, ["year", "q_no"]].reset_index()
@@ -3307,11 +3341,14 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
         coverage = attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
         st.metric("年度カバレッジ", f"{coverage:.0f}%")
 
+    guide_items = "".join(f"<li>{html_module.escape(point)}</li>" for point in CSV_IMPORT_GUIDE_POINTS)
     st.markdown(
-        """
-        <div class="home-data-card">
+        f"""
+        <div class=\"home-data-card\">
             <strong>データの取り込みについて</strong><br>
-            上部のドロップゾーンに CSV を配置すると、このページの「データ入出力」で即座にクイックインポートできます。列マッピングや詳細設定は『設定 ＞ データ入出力』で従来通り調整できます。
+            上部のドロップゾーンに CSV を配置すると、このページの「データ入出力」で即座にクイックインポートできます。列マッピングや詳細設定は『設定 ＞ データ入出力』で従来通り調整できます。<br>
+            <ul>{guide_items}</ul>
+            <a href=\"{CSV_IMPORT_TUTORIAL_URL}\" target=\"_blank\">CSVインポート手順の動画を見る</a>
         </div>
         """,
         unsafe_allow_html=True,
@@ -5695,6 +5732,8 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
         mime="application/zip",
     )
     st.caption("設問・正答データのCSV/XLSXテンプレートが含まれます。必要に応じて編集してご利用ください。")
+    st.video(CSV_IMPORT_TUTORIAL_URL)
+    st.markdown(build_csv_import_guide_markdown())
     if SCHEMA_GUIDE_PATH.exists():
         st.markdown(
             "📘 データ列の詳細仕様は下記のスキーマガイドで確認できます。テンプレート編集前にご覧ください。"
@@ -6024,6 +6063,7 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     )
     datasets = []
     file_summaries: List[Dict[str, object]] = []
+    had_errors = False
     if uploaded_files:
         for file in uploaded_files:
             file_summary = {
@@ -6041,7 +6081,11 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
                     elif kind == MAPPING_KIND_ANSWERS:
                         file_summary["answers"] += len(df)
             except Exception as e:
-                st.error(f"{file.name}: 読み込みに失敗しました ({e})")
+                had_errors = True
+                summary = f"{file.name}: 読み込みに失敗しました。"
+                st.error(f"{summary}原因: {e}")
+                with st.expander(f"{file.name} のエラー詳細", expanded=False):
+                    st.markdown(f"```\n{traceback.format_exc()}\n```")
             else:
                 file_summaries.append(file_summary)
                 st.caption(
@@ -6136,16 +6180,39 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
             )
             if selected_col != "未設定":
                 mapping[key] = selected_col
+        dataset["mapping"] = mapping
+        file_label = original_name or dataset["name"]
+        try:
+            prepared_df = apply_column_mapping(df, mapping)
+        except Exception:
+            had_errors = True
+            st.error(f"{display_name} の列マッピングに失敗しました。")
+            with st.expander(f"{file_label} のエラー詳細", expanded=False):
+                st.markdown(f"```\n{traceback.format_exc()}\n```")
+            continue
+        if kind == MAPPING_KIND_QUESTIONS:
+            validation_errors = validate_question_records(prepared_df)
+        else:
+            validation_errors = validate_answer_records(prepared_df)
+        if validation_errors:
+            had_errors = True
+            st.error(f"{display_name} のバリデーションで {len(validation_errors)} 件の問題が見つかりました。")
+            with st.expander(f"{file_label} のエラー詳細", expanded=False):
+                for err in validation_errors:
+                    st.markdown(f"- {err}")
+            continue
         try:
             if kind == MAPPING_KIND_QUESTIONS:
-                normalized = normalize_questions(df, mapping=mapping)
+                normalized = normalize_questions(prepared_df)
                 normalized_question_frames.append(normalized)
             else:
-                normalized = normalize_answers(df, mapping=mapping)
+                normalized = normalize_answers(prepared_df)
                 normalized_answer_frames.append(normalized)
-            dataset["mapping"] = mapping
         except Exception as e:
-            st.error(f"マッピングエラー: {e}")
+            had_errors = True
+            st.error(f"{display_name} の正規化でエラーが発生しました。原因: {e}")
+            with st.expander(f"{file_label} のエラー詳細", expanded=False):
+                st.markdown(f"```\n{traceback.format_exc()}\n```")
 
     if st.checkbox("マッピングをテンプレート保存"):
         profile_name = st.text_input("テンプレート名")
@@ -6155,8 +6222,14 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
             st.success("マッピングテンプレートを保存しました")
 
     if not normalized_question_frames:
-        st.warning("設問データがありません。")
+        if had_errors:
+            st.error("設問データの取り込みに失敗しました。上記のエラーを修正して再度アップロードしてください。")
+        else:
+            st.warning("設問データがありません。")
         return
+
+    if had_errors:
+        st.info("一部のファイルでエラーが発生しました。問題のないデータのみで取り込みを続行します。")
 
     merged_questions = pd.concat(normalized_question_frames).drop_duplicates(subset=["id"])
     merged_answers = pd.concat(normalized_answer_frames) if normalized_answer_frames else pd.DataFrame()
