@@ -403,7 +403,7 @@ def apply_user_preferences() -> None:
         theme_css = """
 [data-testid="stAppViewContainer"] {
     background-color: #0e1117;
-    color: #e7eefc;
+    color: #f4f7ff;
 }
 [data-testid="stSidebar"] {
     background-color: #111827;
