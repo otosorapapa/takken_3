@@ -2293,7 +2293,52 @@ def main() -> None:
 
 
 def render_home(db: DBManager, df: pd.DataFrame) -> None:
+    st.markdown(
+        """
+        <style>
+        .home-dropzone-card {
+            background: rgba(64, 138, 255, 0.08);
+            border: 1px dashed rgba(64, 138, 255, 0.35);
+            border-radius: 1rem;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1.2rem;
+        }
+        .home-dropzone-card strong {
+            display: block;
+            font-size: 1.05rem;
+            margin-bottom: 0.25rem;
+        }
+        .home-data-card {
+            background: rgba(0, 0, 0, 0.03);
+            border: 1px solid rgba(49, 51, 63, 0.08);
+            border-radius: 0.9rem;
+            padding: 1.2rem 1.4rem;
+            margin-bottom: 1.5rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.title("ホーム")
+    dropzone_files = st.file_uploader(
+        "questions.csv / answers.csv をドラッグ＆ドロップ",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="home_dropzone",
+        label_visibility="collapsed",
+        help="ページ全体がドロップゾーンとして機能します。questions.csv と answers.csv をまとめて追加できます。",
+    )
+    st.markdown(
+        """
+        <div class="home-dropzone-card">
+            <strong>CSVをドラッグ＆ドロップ</strong>
+            ページ全体がドロップゾーンとして機能します。ここに追加した questions.csv / answers.csv は下のクイックインポートに自動で反映されます。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     attempts = db.get_attempt_stats()
     st.markdown("### サマリー")
     col1, col2, col3 = st.columns(3)
@@ -2304,7 +2349,30 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
     with col3:
         coverage = attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
         st.metric("年度カバレッジ", f"{coverage:.0f}%")
-    st.info("過去問データと解答データをアップロードして学習を開始しましょう。『設定 ＞ データ入出力』から取り込めます。")
+
+    st.markdown(
+        """
+        <div class="home-data-card">
+            <strong>データの取り込みについて</strong><br>
+            上部のドロップゾーンに CSV を配置すると、このページの「データ入出力」で即座にクイックインポートできます。列マッピングや詳細設定は『設定 ＞ データ入出力』で従来通り調整できます。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### データ入出力")
+    st.caption("questions.csv / answers.csv の読み込みと学習履歴のエクスポートをホームから直接操作できます。")
+    render_quick_import_controls(
+        db,
+        key_prefix="home",
+        heading="#### クイックインポート (questions.csv / answers.csv)",
+        initial_files=dropzone_files or None,
+    )
+    render_history_export_controls(
+        db,
+        heading="#### 学習履歴のエクスポート",
+    )
+
     st.markdown("### 最近のインポート")
     with db.engine.connect() as conn:
         logs = pd.read_sql(select(import_logs_table).order_by(import_logs_table.c.id.desc()).limit(5), conn)
@@ -4168,6 +4236,229 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
         st.info("改善の傾向を示す論点はまだ検出されていません。継続して学習しましょう。")
 
 
+def select_uploaded_file_by_name(
+    files: Sequence["UploadedFile"], keyword: str
+) -> Optional["UploadedFile"]:
+    keyword_lower = keyword.lower()
+    for file in files:
+        if keyword_lower in file.name.lower():
+            return file
+    return None
+
+
+def execute_quick_import(
+    db: DBManager,
+    questions_file: Optional["UploadedFile"],
+    answers_file: Optional["UploadedFile"],
+) -> None:
+    quick_errors: List[str] = []
+    questions_df: Optional[pd.DataFrame] = None
+    answers_df: Optional[pd.DataFrame] = None
+    if questions_file is None and answers_file is None:
+        st.warning("questions.csv か answers.csv のいずれかを選択してください。")
+        return
+
+    if questions_file is not None:
+        data = questions_file.getvalue()
+        try:
+            questions_df = pd.read_csv(io.BytesIO(data))
+        except UnicodeDecodeError:
+            questions_df = pd.read_csv(io.BytesIO(data), encoding="cp932")
+        quick_errors.extend(validate_question_records(questions_df))
+
+    if answers_file is not None:
+        data = answers_file.getvalue()
+        try:
+            answers_df = pd.read_csv(io.BytesIO(data))
+        except UnicodeDecodeError:
+            answers_df = pd.read_csv(io.BytesIO(data), encoding="cp932")
+        quick_errors.extend(validate_answer_records(answers_df))
+
+    if quick_errors:
+        for err in quick_errors:
+            st.error(err)
+        st.info("テンプレートの列構成と突合してください。『テンプレートをダウンロード』から最新のCSVサンプルを取得できます。")
+        return
+
+    policy = {"explanation": "overwrite", "tags": "merge"}
+    merged_df: Optional[pd.DataFrame] = None
+    rejects_q = pd.DataFrame()
+    rejects_a = pd.DataFrame()
+    conflicts = pd.DataFrame()
+    normalization_failed = False
+
+    if questions_df is not None:
+        try:
+            normalized_q = normalize_questions(questions_df)
+        except Exception as exc:
+            st.error(f"questions.csv の整形に失敗しました: {exc}")
+            normalization_failed = True
+            normalized_q = None
+    else:
+        normalized_q = None
+
+    if answers_df is not None:
+        try:
+            normalized_a = normalize_answers(answers_df)
+        except Exception as exc:
+            st.error(f"answers.csv の整形に失敗しました: {exc}")
+            normalization_failed = True
+            normalized_a = None
+    else:
+        normalized_a = None
+
+    if normalization_failed:
+        st.warning("列名や値の形式を見直してから再度インポートしてください。")
+        return
+
+    if normalized_q is not None and normalized_a is not None:
+        merged_df, rejects_q, rejects_a, conflicts = merge_questions_answers(
+            normalized_q, normalized_a, policy=policy
+        )
+    elif normalized_q is not None:
+        merged_df = normalized_q
+    elif normalized_a is not None:
+        existing = load_questions_df()
+        if existing.empty:
+            st.error("設問データが存在しません。answers.csv を取り込む前に questions.csv を読み込んでください。")
+        else:
+            merged_df, rejects_q, rejects_a, conflicts = merge_questions_answers(
+                existing, normalized_a, policy=policy
+            )
+
+    if merged_df is None:
+        return
+
+    inserted, updated = db.upsert_questions(merged_df)
+    rebuild_tfidf_cache()
+    st.success(f"クイックインポートが完了しました。追加 {inserted} 件 / 更新 {updated} 件")
+
+    if not rejects_q.empty or not rejects_a.empty:
+        st.warning(
+            f"取り込めなかったレコードがあります。questions: {len(rejects_q)} 件 / answers: {len(rejects_a)} 件"
+        )
+        with st.expander("取り込めなかった行の詳細", expanded=False):
+            if not rejects_q.empty:
+                st.markdown("**questions.csv**")
+                st.dataframe(rejects_q.head(20))
+            if not rejects_a.empty:
+                st.markdown("**answers.csv**")
+                st.dataframe(rejects_a.head(20))
+            st.caption("理由列を参考にCSVの該当行を修正してください。全件はrejects_*.csvでダウンロードできます。")
+
+    if not conflicts.empty:
+        st.info(f"正答の衝突が {len(conflicts)} 件あり、上書きしました。")
+
+
+def render_quick_import_controls(
+    db: DBManager,
+    *,
+    key_prefix: str,
+    heading: Optional[str] = None,
+    initial_files: Optional[Sequence["UploadedFile"]] = None,
+) -> None:
+    if heading:
+        st.markdown(heading)
+
+    st.caption("questions.csv と answers.csv をまとめてドラッグ＆ドロップできます。必要な方だけでも取り込めます。")
+
+    uploaded_files = st.file_uploader(
+        "questions.csv / answers.csv をアップロード",
+        type=["csv"],
+        accept_multiple_files=True,
+        key=f"{key_prefix}_quick_import_files",
+        help="複数ファイルを同時に選択すると自動で候補に入ります。",
+    )
+
+    combined_files: List["UploadedFile"] = []
+    seen_names: Set[str] = set()
+
+    def add_file(file: "UploadedFile") -> None:
+        if file.name not in seen_names:
+            combined_files.append(file)
+            seen_names.add(file.name)
+
+    if initial_files:
+        for file in initial_files:
+            add_file(file)
+        st.caption("ドロップゾーンに追加したファイルが候補として表示されています。")
+
+    if uploaded_files:
+        for file in uploaded_files:
+            add_file(file)
+
+    option_files = combined_files
+    question_default = select_uploaded_file_by_name(option_files, "questions") or select_uploaded_file_by_name(option_files, "question")
+    answer_default = select_uploaded_file_by_name(option_files, "answers") or select_uploaded_file_by_name(option_files, "answer")
+
+    options = ["選択しない"] + [file.name for file in option_files]
+
+    def get_default_index(default_file: Optional["UploadedFile"]) -> int:
+        if default_file is None:
+            return 0
+        try:
+            return option_files.index(default_file) + 1
+        except ValueError:
+            return 0
+
+    question_index = get_default_index(question_default)
+    answer_index = get_default_index(answer_default)
+
+    if not option_files:
+        st.caption("ファイルを選択するとここに一覧表示されます。上部のドロップゾーンか右のボタンから追加してください。")
+
+    question_selection = st.selectbox(
+        "questions.csv", options, index=question_index, key=f"{key_prefix}_quick_import_question"
+    )
+    answer_selection = st.selectbox(
+        "answers.csv", options, index=answer_index, key=f"{key_prefix}_quick_import_answer"
+    )
+
+    def resolve_selection(selection: str) -> Optional["UploadedFile"]:
+        if selection == "選択しない":
+            return None
+        for file in option_files:
+            if file.name == selection:
+                return file
+        return None
+
+    selected_questions = resolve_selection(question_selection)
+    selected_answers = resolve_selection(answer_selection)
+
+    if st.button("クイックインポート実行", key=f"{key_prefix}_quick_import_button"):
+        execute_quick_import(db, selected_questions, selected_answers)
+
+
+def render_history_export_controls(
+    db: DBManager,
+    *,
+    heading: Optional[str] = None,
+) -> None:
+    if heading:
+        st.markdown(heading)
+
+    with db.engine.connect() as conn:
+        attempts_df = pd.read_sql(select(attempts_table), conn)
+        exams_df = pd.read_sql(select(exams_table), conn)
+
+    if not attempts_df.empty:
+        buffer = io.StringIO()
+        attempts_df.to_csv(buffer, index=False)
+        st.download_button("attempts.csv をダウンロード", buffer.getvalue(), file_name="attempts.csv", mime="text/csv")
+    else:
+        st.caption("attempts.csv：学習履歴はまだありません。学習モードで解答するとダウンロード可能になります。")
+
+    if not exams_df.empty:
+        buffer = io.StringIO()
+        exams_df.to_csv(buffer, index=False)
+        st.download_button("exams.csv をダウンロード", buffer.getvalue(), file_name="exams.csv", mime="text/csv")
+    else:
+        st.caption("exams.csv：模試の受験履歴はまだありません。模試モードで本試験を体験しましょう。")
+
+    if DB_PATH.exists():
+        st.download_button("SQLiteバックアップをダウンロード", DB_PATH.read_bytes(), file_name="takken.db")
+
+
 def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     render_specialized_header(parent_nav, "データ入出力", "data_io")
     st.subheader("データ入出力")
@@ -4245,105 +4536,11 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
             history_df[["fetched_at", "source", "status", "revisions_detected", "questions_generated", "message"]],
             use_container_width=True,
         )
-    st.markdown("### クイックインポート (questions.csv / answers.csv)")
-    quick_cols = st.columns(2)
-    with quick_cols[0]:
-        quick_questions_file = st.file_uploader(
-            "questions.csv をアップロード",
-            type=["csv"],
-            key="quick_questions_file",
-        )
-    with quick_cols[1]:
-        quick_answers_file = st.file_uploader(
-            "answers.csv をアップロード",
-            type=["csv"],
-            key="quick_answers_file",
-        )
-    if st.button("クイックインポート実行", key="quick_import_button"):
-        quick_errors: List[str] = []
-        questions_df: Optional[pd.DataFrame] = None
-        answers_df: Optional[pd.DataFrame] = None
-        if quick_questions_file is None and quick_answers_file is None:
-            st.warning("questions.csv か answers.csv のいずれかを選択してください。")
-        else:
-            if quick_questions_file is not None:
-                data = quick_questions_file.getvalue()
-                try:
-                    questions_df = pd.read_csv(io.BytesIO(data))
-                except UnicodeDecodeError:
-                    questions_df = pd.read_csv(io.BytesIO(data), encoding="cp932")
-                quick_errors.extend(validate_question_records(questions_df))
-            if quick_answers_file is not None:
-                data = quick_answers_file.getvalue()
-                try:
-                    answers_df = pd.read_csv(io.BytesIO(data))
-                except UnicodeDecodeError:
-                    answers_df = pd.read_csv(io.BytesIO(data), encoding="cp932")
-                quick_errors.extend(validate_answer_records(answers_df))
-            if quick_errors:
-                for err in quick_errors:
-                    st.error(err)
-                st.info("テンプレートの列構成と突合してください。『テンプレートをダウンロード』から最新のCSVサンプルを取得できます。")
-            else:
-                policy = {"explanation": "overwrite", "tags": "merge"}
-                merged_df: Optional[pd.DataFrame] = None
-                rejects_q = pd.DataFrame()
-                rejects_a = pd.DataFrame()
-                conflicts = pd.DataFrame()
-                normalization_failed = False
-                if questions_df is not None:
-                    try:
-                        normalized_q = normalize_questions(questions_df)
-                    except Exception as exc:
-                        st.error(f"questions.csv の整形に失敗しました: {exc}")
-                        normalization_failed = True
-                        normalized_q = None
-                else:
-                    normalized_q = None
-                if answers_df is not None:
-                    try:
-                        normalized_a = normalize_answers(answers_df)
-                    except Exception as exc:
-                        st.error(f"answers.csv の整形に失敗しました: {exc}")
-                        normalization_failed = True
-                        normalized_a = None
-                else:
-                    normalized_a = None
-                if normalization_failed:
-                    st.warning("列名や値の形式を見直してから再度インポートしてください。")
-                else:
-                    if normalized_q is not None and normalized_a is not None:
-                        merged_df, rejects_q, rejects_a, conflicts = merge_questions_answers(
-                            normalized_q, normalized_a, policy=policy
-                        )
-                    elif normalized_q is not None:
-                        merged_df = normalized_q
-                    elif normalized_a is not None:
-                        existing = load_questions_df()
-                        if existing.empty:
-                            st.error("設問データが存在しません。answers.csv を取り込む前に questions.csv を読み込んでください。")
-                        else:
-                            merged_df, rejects_q, rejects_a, conflicts = merge_questions_answers(
-                                existing, normalized_a, policy=policy
-                            )
-                    if merged_df is not None:
-                        inserted, updated = db.upsert_questions(merged_df)
-                        rebuild_tfidf_cache()
-                        st.success(f"クイックインポートが完了しました。追加 {inserted} 件 / 更新 {updated} 件")
-                        if not rejects_q.empty or not rejects_a.empty:
-                            st.warning(
-                                f"取り込めなかったレコードがあります。questions: {len(rejects_q)} 件 / answers: {len(rejects_a)} 件"
-                            )
-                            with st.expander("取り込めなかった行の詳細", expanded=False):
-                                if not rejects_q.empty:
-                                    st.markdown("**questions.csv**")
-                                    st.dataframe(rejects_q.head(20))
-                                if not rejects_a.empty:
-                                    st.markdown("**answers.csv**")
-                                    st.dataframe(rejects_a.head(20))
-                                st.caption("理由列を参考にCSVの該当行を修正してください。全件はrejects_*.csvでダウンロードできます。")
-                        if not conflicts.empty:
-                            st.info(f"正答の衝突が {len(conflicts)} 件あり、上書きしました。")
+    render_quick_import_controls(
+        db,
+        key_prefix="settings",
+        heading="### クイックインポート (questions.csv / answers.csv)",
+    )
 
     st.markdown("### 予想問題インポート (predicted.csv)")
     predicted_file = st.file_uploader(
@@ -4721,20 +4918,10 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
         )
         st.table(pd.DataFrame(summary_rows))
 
-    st.markdown("### (5) 履歴エクスポート")
-    with db.engine.connect() as conn:
-        attempts_df = pd.read_sql(select(attempts_table), conn)
-        exams_df = pd.read_sql(select(exams_table), conn)
-    if not attempts_df.empty:
-        buffer = io.StringIO()
-        attempts_df.to_csv(buffer, index=False)
-        st.download_button("attempts.csv をダウンロード", buffer.getvalue(), file_name="attempts.csv", mime="text/csv")
-    if not exams_df.empty:
-        buffer = io.StringIO()
-        exams_df.to_csv(buffer, index=False)
-        st.download_button("exams.csv をダウンロード", buffer.getvalue(), file_name="exams.csv", mime="text/csv")
-    if DB_PATH.exists():
-        st.download_button("SQLiteバックアップをダウンロード", DB_PATH.read_bytes(), file_name="takken.db")
+    render_history_export_controls(
+        db,
+        heading="### (5) 履歴エクスポート",
+    )
 
     st.markdown("### (6) データ消去")
     with st.form("data_reset_form"):
