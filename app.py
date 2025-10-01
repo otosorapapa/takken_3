@@ -2082,11 +2082,15 @@ def build_question_priority(df: pd.DataFrame, attempts: pd.DataFrame) -> pd.Data
     elapsed_days_threshold = max(int(settings.get("review_elapsed_days", 7)), 1)
     base = df[["id", "category", "difficulty"]].copy()
     base["difficulty"] = base["difficulty"].fillna(DIFFICULTY_DEFAULT).astype(float)
-    base["attempts_count"] = 0
-    base["correct_count"] = 0
-    base["accuracy"] = 0.5
-    base["last_confidence"] = float(low_conf_threshold)
-    base["days_since_last_attempt"] = float(elapsed_days_threshold)
+    metrics_defaults = {
+        "attempts_count": 0,
+        "correct_count": 0,
+        "accuracy": 0.5,
+        "last_confidence": float(low_conf_threshold),
+        "days_since_last_attempt": float(elapsed_days_threshold),
+    }
+    for column, default in metrics_defaults.items():
+        base[column] = default
     if not attempts.empty:
         attempts = attempts.copy()
         attempts["created_at"] = pd.to_datetime(attempts["created_at"])
@@ -2112,8 +2116,22 @@ def build_question_priority(df: pd.DataFrame, attempts: pd.DataFrame) -> pd.Data
         summary["days_since_last_attempt"] = (
             (now - summary["last_attempt_at"]).dt.total_seconds() / 86400.0
         )
-        base = base.merge(summary, left_on="id", right_on="question_id", how="left")
-        base.drop(columns=[col for col in ["question_id", "last_attempt_at"] if col in base.columns], inplace=True)
+        base = base.merge(
+            summary,
+            left_on="id",
+            right_on="question_id",
+            how="left",
+            suffixes=("", "_summary"),
+        )
+        base.drop(
+            columns=[col for col in ["question_id", "last_attempt_at"] if col in base.columns],
+            inplace=True,
+        )
+        for column, default in metrics_defaults.items():
+            summary_col = f"{column}_summary"
+            if summary_col in base.columns:
+                base[column] = base[summary_col]
+                base.drop(columns=[summary_col], inplace=True)
         base["attempts_count"] = base["attempts_count"].fillna(0).astype(int)
         base["correct_count"] = base["correct_count"].fillna(0).astype(int)
         base["accuracy"] = base["accuracy"].fillna(0.5)
