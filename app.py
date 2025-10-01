@@ -1735,23 +1735,124 @@ class QuestionNavigation:
     label: Optional[str] = None
 
 
-def select_random_questions(df: pd.DataFrame, count: int) -> List[str]:
-    if df.empty:
+def select_random_questions(
+    df: pd.DataFrame,
+    count: int,
+    weights: Optional[Sequence[float]] = None,
+) -> List[str]:
+    if df.empty or count <= 0:
         return []
-    return random.sample(list(df["id"]), min(count, len(df)))
+    ids = list(df["id"])
+    population = len(ids)
+    draw = min(count, population)
+    if draw == 0:
+        return []
+    if weights is not None:
+        weight_array = np.asarray(list(weights), dtype=float)
+        if weight_array.shape[0] != population:
+            raise ValueError("weights length must match dataframe length")
+        weight_array = np.where(np.isnan(weight_array) | (weight_array < 0), 0.0, weight_array)
+        if float(weight_array.sum()) <= 0.0:
+            weight_array = np.ones(population, dtype=float)
+        probabilities = weight_array / weight_array.sum()
+        indices = np.random.choice(population, size=draw, replace=False, p=probabilities)
+        return [ids[i] for i in indices]
+    if draw == population:
+        return ids
+    return random.sample(ids, draw)
 
 
-def stratified_exam(df: pd.DataFrame) -> List[str]:
+def build_question_priority(df: pd.DataFrame, attempts: pd.DataFrame) -> pd.DataFrame:
+    settings = st.session_state.get("settings", {})
+    low_conf_threshold = int(settings.get("review_low_confidence_threshold", 60))
+    elapsed_days_threshold = max(int(settings.get("review_elapsed_days", 7)), 1)
+    base = df[["id", "category", "difficulty"]].copy()
+    base["difficulty"] = base["difficulty"].fillna(DIFFICULTY_DEFAULT).astype(float)
+    base["attempts_count"] = 0
+    base["correct_count"] = 0
+    base["accuracy"] = 0.5
+    base["last_confidence"] = float(low_conf_threshold)
+    base["days_since_last_attempt"] = float(elapsed_days_threshold)
+    if not attempts.empty:
+        attempts = attempts.copy()
+        attempts["created_at"] = pd.to_datetime(attempts["created_at"])
+        summary = (
+            attempts.groupby("question_id")
+            .agg(
+                attempts_count=("is_correct", "count"),
+                correct_count=("is_correct", "sum"),
+                last_attempt_at=("created_at", "max"),
+            )
+            .reset_index()
+        )
+        last_conf = (
+            attempts.sort_values("created_at")
+            .groupby("question_id")
+            .agg(last_confidence=("confidence", "last"))
+            .reset_index()
+        )
+        summary = summary.merge(last_conf, on="question_id", how="left")
+        summary["accuracy"] = summary["correct_count"] / summary["attempts_count"].replace(0, np.nan)
+        summary["accuracy"] = summary["accuracy"].clip(lower=0.0, upper=1.0)
+        now = dt.datetime.now()
+        summary["days_since_last_attempt"] = (
+            (now - summary["last_attempt_at"]).dt.total_seconds() / 86400.0
+        )
+        base = base.merge(summary, left_on="id", right_on="question_id", how="left")
+        base.drop(columns=[col for col in ["question_id", "last_attempt_at"] if col in base.columns], inplace=True)
+        base["attempts_count"] = base["attempts_count"].fillna(0).astype(int)
+        base["correct_count"] = base["correct_count"].fillna(0).astype(int)
+        base["accuracy"] = base["accuracy"].fillna(0.5)
+        base["last_confidence"] = pd.to_numeric(base["last_confidence"], errors="coerce")
+        base["last_confidence"] = base["last_confidence"].fillna(low_conf_threshold)
+        base["days_since_last_attempt"] = base["days_since_last_attempt"].fillna(float(elapsed_days_threshold))
+    base["accuracy"] = base["accuracy"].clip(lower=0.0, upper=1.0)
+    base["last_confidence"] = base["last_confidence"].clip(lower=0.0, upper=100.0)
+    base["days_since_last_attempt"] = base["days_since_last_attempt"].clip(lower=0.0)
+    accuracy_component = 1.0 + (1.0 - base["accuracy"])
+    conf_gap = np.clip((low_conf_threshold - base["last_confidence"]) / max(low_conf_threshold, 1), 0.0, 1.0)
+    confidence_component = 1.0 + conf_gap
+    days_ratio = np.clip(base["days_since_last_attempt"] / float(elapsed_days_threshold), 0.0, 3.0)
+    days_component = 1.0 + days_ratio * 0.4
+    difficulty_component = 1.0 + (base["difficulty"] - 3.0) * 0.15
+    base["raw_weight"] = (accuracy_component + confidence_component + days_component) * difficulty_component
+    category_stats = (
+        base.groupby("category")
+        .agg(
+            category_accuracy=("accuracy", "mean"),
+            category_difficulty=("difficulty", "mean"),
+        )
+        .reset_index()
+    )
+    category_stats["category_accuracy"] = category_stats["category_accuracy"].fillna(0.5)
+    category_stats["category_multiplier"] = 1.0 + (
+        (1.0 - category_stats["category_accuracy"]) * 1.2
+    ) + np.maximum(category_stats["category_difficulty"] - 3.0, 0.0) * 0.1
+    multiplier_map = dict(zip(category_stats["category"], category_stats["category_multiplier"]))
+    base["category_multiplier"] = base["category"].map(multiplier_map).fillna(1.0)
+    base["weight"] = base["raw_weight"] * base["category_multiplier"]
+    return base
+
+
+def stratified_exam(
+    df: pd.DataFrame, weight_map: Optional[Dict[str, float]] = None
+) -> List[str]:
     quotas = {"宅建業法": 20, "権利関係": 14, "法令上の制限": 8, "税・その他": 8}
     selected = []
     remaining = df.copy()
     for category, quota in quotas.items():
         subset = remaining[remaining["category"] == category]
-        chosen = select_random_questions(subset, quota)
+        subset_weights = None
+        if weight_map is not None:
+            subset_weights = [weight_map.get(qid, 1.0) for qid in subset["id"]]
+        chosen = select_random_questions(subset, quota, subset_weights)
         selected.extend(chosen)
         remaining = remaining[~remaining["id"].isin(chosen)]
     if len(selected) < 50:
-        additional = select_random_questions(remaining, 50 - len(selected))
+        additional_weights = None
+        if weight_map is not None:
+            additional_weights = [weight_map.get(qid, 1.0) for qid in remaining["id"]]
+        additional = select_random_questions(remaining, 50 - len(selected), additional_weights)
         selected.extend(additional)
     return selected
 
@@ -2491,6 +2592,22 @@ def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
     if len(df) < 50:
         st.info("50問の出題には最低50問のデータが必要です。データを追加してください。")
         return
+    attempts = db.get_attempt_stats()
+    priority_df = build_question_priority(df, attempts)
+    weight_map = dict(zip(priority_df["id"], priority_df["weight"]))
+    if not attempts.empty:
+        category_focus = (
+            priority_df.groupby("category")["weight"].mean().sort_values(ascending=False)
+        )
+        if not category_focus.empty:
+            highlights = [
+                f"{category} (優先度 {score:.2f})"
+                for category, score in category_focus.head(2).items()
+            ]
+            st.caption(
+                "最近の弱点傾向を踏まえ、以下の分野が優先的に出題されます: "
+                + "、".join(highlights)
+            )
     session: Optional[ExamSession] = st.session_state.get("exam_session")
     error_key = "_full_exam_error"
     error_message = st.session_state.pop(error_key, None)
@@ -2498,7 +2615,7 @@ def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
         st.warning(error_message)
 
     def start_full_exam_session() -> None:
-        questions = stratified_exam(df)
+        questions = stratified_exam(df, weight_map if weight_map else None)
         if not questions:
             st.session_state[error_key] = "出題可能な問題が不足しています。データを確認してください。"
             return
@@ -2610,7 +2727,35 @@ def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
 
 def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
     st.subheader("分野別ドリル")
-    st.caption("民法・借地借家法・都市計画法・建築基準法・税・鑑定評価・宅建業法といったテーマをピンポイントで鍛えます。")
+    st.caption(
+        "民法・借地借家法・都市計画法・建築基準法・税・鑑定評価・宅建業法といったテーマをピンポイントで鍛えます。"
+        " 履歴に基づく優先度スコアを参照して弱点強化にも対応します。"
+    )
+    attempts = db.get_attempt_stats()
+    priority_df = build_question_priority(df, attempts)
+    priority_columns = priority_df[
+        [
+            "id",
+            "weight",
+            "accuracy",
+            "last_confidence",
+            "days_since_last_attempt",
+            "attempts_count",
+        ]
+    ].rename(columns={"weight": "priority_score"})
+    settings = st.session_state.get("settings", {})
+    default_confidence = int(settings.get("review_low_confidence_threshold", 60))
+    default_elapsed = int(settings.get("review_elapsed_days", 7))
+    mode_options = ["手動選択"]
+    if not attempts.empty:
+        mode_options.append("弱点優先")
+    mode = st.radio(
+        "出題モード",
+        mode_options,
+        horizontal=True,
+        key="subject_mode",
+        help="履歴から算出した優先度をもとに手動選択または自動キューを切り替えます。",
+    )
     with st.expander("出題条件", expanded=True):
         preset = st.selectbox(
             "クイックプリセット",
@@ -2683,11 +2828,127 @@ def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
     if filtered.empty:
         st.warning("条件に合致する問題がありません。フィルタを調整してください。")
         return
-    st.caption(f"現在の条件に合致する問題は {len(filtered)} 件です。")
+    filtered = filtered.merge(priority_columns, on="id", how="left")
+    filtered["priority_score"] = filtered["priority_score"].fillna(0.0)
+    filtered["accuracy"] = filtered["accuracy"].fillna(0.5)
+    filtered["last_confidence"] = filtered["last_confidence"].fillna(float(default_confidence))
+    filtered["days_since_last_attempt"] = filtered["days_since_last_attempt"].fillna(float(default_elapsed))
+    filtered["attempts_count"] = filtered["attempts_count"].fillna(0).astype(int)
+    st.caption(
+        f"現在の条件に合致する問題は {len(filtered)} 件です。"
+        "優先度スコアは正答率・確信度・経過日数を組み合わせて算出しています。"
+    )
+    with st.expander("優先度付き一覧", expanded=False):
+        display = filtered[[
+            "id",
+            "category",
+            "difficulty",
+            "priority_score",
+            "accuracy",
+            "last_confidence",
+            "days_since_last_attempt",
+            "attempts_count",
+        ]].copy()
+        display["accuracy"] = (display["accuracy"] * 100).round(0)
+        display["last_confidence"] = display["last_confidence"].round(0)
+        display["days_since_last_attempt"] = display["days_since_last_attempt"].round(1)
+        st.dataframe(
+            display.rename(
+                columns={
+                    "id": "問題ID",
+                    "category": "分野",
+                    "difficulty": "難易度",
+                    "priority_score": "優先度",
+                    "accuracy": "直近正答率(%)",
+                    "last_confidence": "直近確信度(%)",
+                    "days_since_last_attempt": "経過日数",
+                    "attempts_count": "挑戦回数",
+                }
+            ).set_index("問題ID"),
+            use_container_width=True,
+        )
+    if mode == "弱点優先":
+        prioritized = filtered.sort_values(
+            ["priority_score", "accuracy"], ascending=[False, True]
+        ).reset_index(drop=True)
+        signature = (
+            tuple(sorted(categories)),
+            tuple(sorted(selected_topics)),
+            tuple(difficulties),
+            keyword,
+            bool(review_only),
+        )
+        queue_key = "subject_priority_queue"
+        signature_key = "subject_priority_signature"
+        if st.session_state.get(signature_key) != signature:
+            st.session_state[signature_key] = signature
+            st.session_state[queue_key] = prioritized["id"].tolist()
+        queue: List[str] = st.session_state.get(queue_key, [])
+        if not queue:
+            st.info("優先度条件に合致する問題がありません。フィルタを見直してください。")
+            return
+        current_id = queue[0]
+        current_row = prioritized[prioritized["id"] == current_id].iloc[0]
+        summary_parts = [f"優先度 {current_row['priority_score']:.2f}"]
+        if not pd.isna(current_row.get("accuracy")):
+            summary_parts.append(f"正答率 {current_row['accuracy'] * 100:.0f}%")
+        if not pd.isna(current_row.get("last_confidence")):
+            summary_parts.append(f"確信度 {current_row['last_confidence']:.0f}%")
+        if not pd.isna(current_row.get("days_since_last_attempt")):
+            summary_parts.append(
+                f"経過 {current_row['days_since_last_attempt']:.0f}日"
+            )
+        st.info(" / ".join(summary_parts))
+
+        def advance_priority_queue() -> None:
+            queue_inner = st.session_state.get(queue_key, [])
+            if queue_inner:
+                queue_inner.pop(0)
+            st.session_state[queue_key] = queue_inner
+            safe_rerun()
+
+        with st.expander("優先出題キュー", expanded=False):
+            preview = prioritized.head(10)[["id", "priority_score", "accuracy"]]
+            preview["accuracy"] = (preview["accuracy"] * 100).round(0)
+            st.dataframe(
+                preview.rename(
+                    columns={
+                        "id": "問題ID",
+                        "priority_score": "優先度",
+                        "accuracy": "正答率(%)",
+                    }
+                ).set_index("問題ID"),
+                use_container_width=True,
+            )
+        current_row = filtered[filtered["id"] == current_id].iloc[0]
+        render_question_interaction(
+            db,
+            current_row,
+            attempt_mode="subject_drill",
+            key_prefix="subject",
+        )
+        st.button(
+            "次の優先問題に進む",
+            key="subject_priority_next",
+            help="キューから現在の問題を除外し、次の優先問題を表示します。",
+            on_click=with_rerun(advance_priority_queue),
+        )
+        return
+
+    def format_priority_label(question_id: str) -> str:
+        label = format_question_label(filtered, question_id)
+        row = filtered[filtered["id"] == question_id]
+        if row.empty:
+            return label
+        score = row.iloc[0].get("priority_score")
+        if pd.notna(score):
+            return f"{label}｜優先度 {score:.2f}"
+        return label
+
     question_id = st.selectbox(
         "出題問題",
         filtered["id"],
-        format_func=lambda x: format_question_label(filtered, x),
+        format_func=format_priority_label,
         key="subject_question_select",
     )
     row = filtered[filtered["id"] == question_id].iloc[0]
