@@ -61,6 +61,13 @@ DEFAULT_CATEGORY_MAP = {
     "税その他": "税・その他",
 }
 CATEGORY_CHOICES = ["宅建業法", "権利関係", "法令上の制限", "税・その他"]
+CATEGORY_BADGE_STYLE = {
+    "宅建業法": {"icon": "🏢", "class": "takken-tag--category-business"},
+    "権利関係": {"icon": "⚖️", "class": "takken-tag--category-rights"},
+    "法令上の制限": {"icon": "🛣️", "class": "takken-tag--category-regulation"},
+    "税・その他": {"icon": "💰", "class": "takken-tag--category-tax"},
+}
+CATEGORY_BADGE_DEFAULT = {"icon": "📘", "class": "takken-tag--category-default"}
 DIFFICULTY_DEFAULT = 3
 LAW_REFERENCE_BASE_URL = "https://elaws.e-gov.go.jp/search?q={query}"
 
@@ -2348,10 +2355,218 @@ def inject_ui_styles() -> None:
 .takken-feedback-summary strong {
     font-weight: 600;
 }
+.takken-tag-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.25rem 0 0.75rem;
+}
+.takken-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    border: 1px solid transparent;
+    background-color: rgba(108, 117, 125, 0.16);
+    color: #374151;
+}
+[data-theme="dark"] .takken-tag {
+    background-color: rgba(148, 163, 184, 0.16);
+    color: #e2e8f0;
+}
+.takken-tag-icon {
+    font-size: 0.95rem;
+    line-height: 1;
+}
+.takken-tag-label {
+    line-height: 1.2;
+}
+.takken-tag--category-business {
+    background-color: rgba(76, 110, 245, 0.18);
+    border-color: rgba(76, 110, 245, 0.35);
+    color: #2f4f9e;
+}
+[data-theme="dark"] .takken-tag--category-business {
+    background-color: rgba(118, 145, 255, 0.22);
+    border-color: rgba(118, 145, 255, 0.5);
+    color: #dbe4ff;
+}
+.takken-tag--category-rights {
+    background-color: rgba(34, 197, 94, 0.18);
+    border-color: rgba(34, 197, 94, 0.35);
+    color: #1b4332;
+}
+[data-theme="dark"] .takken-tag--category-rights {
+    background-color: rgba(52, 211, 153, 0.22);
+    border-color: rgba(52, 211, 153, 0.5);
+    color: #bbf7d0;
+}
+.takken-tag--category-regulation {
+    background-color: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.35);
+    color: #854d0e;
+}
+[data-theme="dark"] .takken-tag--category-regulation {
+    background-color: rgba(251, 191, 36, 0.22);
+    border-color: rgba(251, 191, 36, 0.5);
+    color: #fde68a;
+}
+.takken-tag--category-tax {
+    background-color: rgba(236, 72, 153, 0.18);
+    border-color: rgba(236, 72, 153, 0.35);
+    color: #831843;
+}
+[data-theme="dark"] .takken-tag--category-tax {
+    background-color: rgba(244, 114, 182, 0.22);
+    border-color: rgba(244, 114, 182, 0.5);
+    color: #fbcfe8;
+}
+.takken-tag--category-default {
+    background-color: rgba(100, 116, 139, 0.2);
+    border-color: rgba(100, 116, 139, 0.3);
+    color: #1f2937;
+}
+[data-theme="dark"] .takken-tag--category-default {
+    background-color: rgba(148, 163, 184, 0.24);
+    border-color: rgba(148, 163, 184, 0.45);
+    color: #e2e8f0;
+}
+.takken-tag--topic {
+    background-color: rgba(79, 70, 229, 0.15);
+    border-color: rgba(79, 70, 229, 0.3);
+    color: #3730a3;
+}
+[data-theme="dark"] .takken-tag--topic {
+    background-color: rgba(129, 140, 248, 0.22);
+    border-color: rgba(129, 140, 248, 0.45);
+    color: #c7d2fe;
+}
+.takken-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0;
+    font-size: 0.9rem;
+}
+.takken-table th,
+.takken-table td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+    vertical-align: top;
+}
+[data-theme="dark"] .takken-table th,
+[data-theme="dark"] .takken-table td {
+    border-bottom-color: rgba(203, 213, 225, 0.2);
+}
+.takken-table tbody tr:last-child th,
+.takken-table tbody tr:last-child td {
+    border-bottom: none;
+}
+.takken-table thead th {
+    font-weight: 700;
+    color: inherit;
+}
 """,
         "takken-ui-styles",
     )
     st.session_state["_ui_styles_injected"] = True
+
+
+def _build_tag_html(label: str, icon: Optional[str], class_name: str) -> str:
+    if not label:
+        return ""
+    safe_label = html_module.escape(label)
+    icon_html = (
+        f'<span class="takken-tag-icon">{html_module.escape(icon)}</span>'
+        if icon
+        else ""
+    )
+    return (
+        f'<span class="takken-tag {class_name}">{icon_html}'
+        f'<span class="takken-tag-label">{safe_label}</span></span>'
+    )
+
+
+def render_category_tag(category: Optional[str]) -> str:
+    if category is None or (isinstance(category, float) and pd.isna(category)):
+        return ""
+    normalized = str(category).strip()
+    if not normalized:
+        return ""
+    canonical = DEFAULT_CATEGORY_MAP.get(normalized, normalized)
+    style = CATEGORY_BADGE_STYLE.get(canonical, CATEGORY_BADGE_DEFAULT)
+    style_class = style.get("class", CATEGORY_BADGE_DEFAULT["class"])
+    icon = style.get("icon", CATEGORY_BADGE_DEFAULT["icon"])
+    return _build_tag_html(canonical, icon, style_class)
+
+
+def render_topic_tag(topic: Optional[str]) -> str:
+    if topic is None or (isinstance(topic, float) and pd.isna(topic)):
+        return ""
+    normalized = str(topic).strip()
+    if not normalized:
+        return ""
+    return _build_tag_html(normalized, "🧠", "takken-tag--topic")
+
+
+def render_category_topic_tags(
+    category: Optional[str], topic: Optional[str]
+) -> str:
+    inject_ui_styles()
+    tags: List[str] = []
+    category_tag = render_category_tag(category)
+    if category_tag:
+        tags.append(category_tag)
+    topic_tag = render_topic_tag(topic)
+    if topic_tag:
+        tags.append(topic_tag)
+    if not tags:
+        return ""
+    return f'<div class="takken-tag-group">{"".join(tags)}</div>'
+
+
+def render_table_with_category_tags(
+    df: pd.DataFrame,
+    column_order: Sequence[str],
+    rename_map: Optional[Dict[str, str]] = None,
+    index_column: Optional[str] = None,
+    table_classes: str = "takken-table",
+) -> None:
+    inject_ui_styles()
+    rename_map = rename_map or {}
+    if df.empty:
+        st.markdown("<p>表示するデータがありません。</p>", unsafe_allow_html=True)
+        return
+    display = df.loc[:, column_order].copy()
+    if "category" in display.columns:
+        category_pos = list(display.columns).index("category")
+        category_tags = display["category"].apply(render_category_tag)
+        display = display.drop(columns=["category"])
+        display.insert(category_pos, "_category_tag", category_tags)
+    if index_column and index_column in display.columns:
+        display = display.set_index(index_column)
+        display.index.name = rename_map.get(index_column, index_column)
+    rename_columns: Dict[str, str] = {}
+    for original, new_name in rename_map.items():
+        if original == index_column:
+            continue
+        if original in display.columns:
+            rename_columns[original] = new_name
+    if "_category_tag" in display.columns:
+        rename_columns["_category_tag"] = rename_map.get("category", "分野")
+    display = display.rename(columns=rename_columns)
+    html_table = display.to_html(
+        escape=False,
+        classes=table_classes,
+        border=0,
+        na_rep="",
+    )
+    st.markdown(html_table, unsafe_allow_html=True)
 
 
 def confidence_to_grade(is_correct: bool, confidence: int) -> int:
@@ -3555,17 +3770,20 @@ def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
             selected_id = qid
 
     with st.expander("推奨問題の詳細一覧", expanded=False):
-        display = recommended[["id", "year", "q_no", "category", "difficulty", "priority"]].rename(
-            columns={
+        display = recommended[["id", "year", "q_no", "category", "difficulty", "priority"]].copy()
+        render_table_with_category_tags(
+            display,
+            column_order=["id", "category", "year", "q_no", "difficulty", "priority"],
+            rename_map={
                 "id": "問題ID",
+                "category": "分野",
                 "year": "年度",
                 "q_no": "問番",
-                "category": "分野",
                 "difficulty": "難易度",
                 "priority": "推奨度",
-            }
+            },
+            index_column="id",
         )
-        st.dataframe(display.set_index("問題ID"), use_container_width=True)
 
     selected_id = st.selectbox(
         "取り組む問題",
@@ -3704,20 +3922,29 @@ def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
         display["accuracy"] = (display["accuracy"] * 100).round(0)
         display["last_confidence"] = display["last_confidence"].round(0)
         display["days_since_last_attempt"] = display["days_since_last_attempt"].round(1)
-        st.dataframe(
-            display.rename(
-                columns={
-                    "id": "問題ID",
-                    "category": "分野",
-                    "difficulty": "難易度",
-                    "priority_score": "優先度",
-                    "accuracy": "直近正答率(%)",
-                    "last_confidence": "直近確信度(%)",
-                    "days_since_last_attempt": "経過日数",
-                    "attempts_count": "挑戦回数",
-                }
-            ).set_index("問題ID"),
-            use_container_width=True,
+        render_table_with_category_tags(
+            display,
+            column_order=[
+                "id",
+                "category",
+                "difficulty",
+                "priority_score",
+                "accuracy",
+                "last_confidence",
+                "days_since_last_attempt",
+                "attempts_count",
+            ],
+            rename_map={
+                "id": "問題ID",
+                "category": "分野",
+                "difficulty": "難易度",
+                "priority_score": "優先度",
+                "accuracy": "直近正答率(%)",
+                "last_confidence": "直近確信度(%)",
+                "days_since_last_attempt": "経過日数",
+                "attempts_count": "挑戦回数",
+            },
+            index_column="id",
         )
     if mode == "弱点優先":
         prioritized = filtered.sort_values(
@@ -3944,33 +4171,30 @@ def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
             "attempts_count",
             "avg_seconds",
         ]
-    ].rename(
-        columns={
+    ].copy()
+    display_df["accuracy"] = (display_df["accuracy"].astype(float) * 100).round(0)
+    display_df["avg_seconds"] = display_df["avg_seconds"].astype(float).round(1)
+    render_table_with_category_tags(
+        display_df,
+        column_order=[
+            "question_id",
+            "category",
+            "year",
+            "q_no",
+            "accuracy",
+            "attempts_count",
+            "avg_seconds",
+        ],
+        rename_map={
             "question_id": "問題ID",
             "category": "分野",
             "year": "年度",
             "q_no": "問",
-            "accuracy": "正答率",
+            "accuracy": "正答率(%)",
             "attempts_count": "挑戦回数",
             "avg_seconds": "平均解答時間(秒)",
-        }
-    )
-    display_df["正答率"] = display_df["正答率"].astype(float) * 100
-    st.dataframe(
-        display_df.set_index("問題ID"),
-        use_container_width=True,
-        column_config={
-            "分野": st.column_config.TextColumn("分野", help="復習対象のカテゴリです。"),
-            "年度": st.column_config.NumberColumn("年度", format="%d", help="最新年度をクリックでソートできます。"),
-            "問": st.column_config.NumberColumn("問", format="%d", help="年度内での問題番号です。"),
-            "正答率": st.column_config.NumberColumn("正答率", format="%.0f%%", help="低いほど優先的に復習したい問題です。"),
-            "挑戦回数": st.column_config.NumberColumn("挑戦回数", format="%d", help="取り組んだ回数です。"),
-            "平均解答時間(秒)": st.column_config.NumberColumn(
-                "平均解答時間(秒)",
-                format="%.1f",
-                help="長考した問題はミスの温床になりがちです。",
-            ),
         },
+        index_column="question_id",
     )
     candidates = filtered[~filtered["id"].isna()]
     if candidates.empty:
@@ -4631,12 +4855,9 @@ def render_question_interaction(
     st.markdown(f"### {header}")
     category_value = str(row.get("category", "") or "").strip()
     topic_value = str(row.get("topic", "") or "").strip()
-    if category_value and topic_value:
-        st.markdown(f"**{category_value} / {topic_value}**")
-    elif category_value:
-        st.markdown(f"**{category_value}**")
-    elif topic_value:
-        st.markdown(f"**{topic_value}**")
+    tag_html = render_category_topic_tags(category_value, topic_value)
+    if tag_html:
+        st.markdown(tag_html, unsafe_allow_html=True)
     render_law_reference(row, db=db)
     st.markdown(row["question"], unsafe_allow_html=True)
     selected_choice = st.session_state.get(selected_key)
