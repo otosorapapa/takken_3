@@ -354,6 +354,32 @@ def ensure_schema_migrations(engine: Engine) -> None:
         if "grade" not in attempt_columns:
             conn.execute(text("ALTER TABLE attempts ADD COLUMN grade INTEGER"))
 
+        if "outline_notes" in existing_tables:
+            outline_columns = {
+                col["name"] for col in conn_inspector.get_columns("outline_notes")
+            }
+            outline_schema_updates = {
+                "question_label": "TEXT",
+                "tags": "TEXT",
+            }
+            for column_name, sql_type in outline_schema_updates.items():
+                if column_name not in outline_columns:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE outline_notes ADD COLUMN {column_name} {sql_type}"
+                        )
+                    )
+
+            if "updated_at" not in outline_columns:
+                conn.execute(
+                    text("ALTER TABLE outline_notes ADD COLUMN updated_at DATETIME")
+                )
+                conn.execute(
+                    text(
+                        "UPDATE outline_notes SET updated_at = created_at WHERE updated_at IS NULL"
+                    )
+                )
+
         if "law_revision_questions" in existing_tables:
             lr_columns = {
                 col["name"] for col in conn_inspector.get_columns("law_revision_questions")
