@@ -62,6 +62,36 @@ DIFFICULTY_DEFAULT = 3
 LAW_BASELINE_LABEL = "適用法令基準日（R6/4/1）"
 LAW_REFERENCE_BASE_URL = "https://elaws.e-gov.go.jp/search?q={query}"
 
+LAW_NAME_SUFFIXES = (
+    "法",
+    "条例",
+    "規則",
+    "規程",
+    "基準",
+    "告示",
+    "指針",
+    "要綱",
+    "判例",
+)
+LAW_NAME_KEYWORDS = {
+    "宅建業法",
+    "宅地建物取引業法",
+    "民法",
+    "借地借家法",
+    "不動産登記法",
+    "区分所有法",
+    "都市計画法",
+    "建築基準法",
+    "農地法",
+    "国土利用計画法",
+    "住宅瑕疵担保履行法",
+    "景品表示法",
+}
+LAW_NAME_PATTERN = re.compile(
+    r"(?P<law>[一-龠A-Za-z0-9・（）()]+?(?:法|条例|規則|規程|基準|告示|指針|要綱|判例))"
+)
+OUTLINE_CACHE_KEY = "_outline_insights_cache"
+
 FONT_SIZE_SCALE = {
     "やや小さい": 0.95,
     "標準": 1.0,
@@ -197,6 +227,20 @@ attempts_table = Table(
     Column("created_at", DateTime, server_default=func.now()),
 )
 
+outline_notes_table = Table(
+    "outline_notes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("question_id", String, nullable=False),
+    Column("summary", String, nullable=False),
+    Column("law_references", JSON),
+    Column("question_label", String),
+    Column("tags", String),
+    Column("created_at", DateTime, server_default=func.now()),
+    Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
+    UniqueConstraint("question_id", "summary", name="uq_outline_notes_question_summary"),
+)
+
 exams_table = Table(
     "exams",
     metadata,
@@ -295,6 +339,10 @@ def ensure_schema_migrations(engine: Engine) -> None:
         if attempts_table.name not in existing_tables:
             attempts_table.create(conn)
             existing_tables.add(attempts_table.name)
+
+        if outline_notes_table.name not in existing_tables:
+            outline_notes_table.create(conn)
+            existing_tables.add(outline_notes_table.name)
 
         conn_inspector = inspect(conn)
         attempt_columns = {col["name"] for col in conn_inspector.get_columns("attempts")}
@@ -920,6 +968,50 @@ class DBManager:
                 conn,
             )
         return df
+
+    def fetch_outline_notes(self, question_id: Optional[str] = None) -> pd.DataFrame:
+        with self.engine.connect() as conn:
+            stmt = select(outline_notes_table)
+            if question_id:
+                stmt = stmt.where(outline_notes_table.c.question_id == question_id)
+            stmt = stmt.order_by(outline_notes_table.c.updated_at.desc())
+            df = pd.read_sql(stmt, conn)
+        return df
+
+    def save_outline_note(
+        self,
+        question_id: str,
+        summary: str,
+        references: Sequence[Dict[str, str]],
+        question_label: Optional[str] = None,
+        tags: Optional[str] = None,
+    ) -> None:
+        references_payload = [
+            {"label": ref.get("label"), "url": ref.get("url")}
+            for ref in references
+            if isinstance(ref, dict)
+        ]
+        with self.engine.begin() as conn:
+            stmt = sqlite_insert(outline_notes_table).values(
+                question_id=question_id,
+                summary=summary,
+                law_references=references_payload,
+                question_label=question_label,
+                tags=tags,
+            )
+            do_update = stmt.on_conflict_do_update(
+                index_elements=[
+                    outline_notes_table.c.question_id,
+                    outline_notes_table.c.summary,
+                ],
+                set_={
+                    "law_references": stmt.excluded.law_references,
+                    "question_label": stmt.excluded.question_label,
+                    "tags": stmt.excluded.tags,
+                    "updated_at": func.now(),
+                },
+            )
+            conn.execute(do_update)
 
     def upsert_srs(self, question_id: str, payload: Dict[str, Optional[str]]) -> None:
         with self.engine.begin() as conn:
@@ -1946,13 +2038,237 @@ def parse_explanation_sections(text: str) -> Tuple[str, List[Tuple[str, str]]]:
     return summary, sections
 
 
-def render_explanation_content(row: pd.Series) -> None:
+def normalize_law_reference_label(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    text = text.replace("　", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip("、,.;:：")
+    match = LAW_NAME_PATTERN.search(text)
+    candidate: Optional[str] = None
+    if match:
+        candidate = match.group("law")
+    else:
+        for keyword in LAW_NAME_KEYWORDS:
+            if keyword in text:
+                candidate = keyword
+                break
+        if candidate is None:
+            for suffix in LAW_NAME_SUFFIXES:
+                if text.endswith(suffix):
+                    candidate = text
+                    break
+    if not candidate:
+        return None
+    candidate = candidate.replace("　", " ").strip()
+    return candidate
+
+
+def parse_reference_list(value: object) -> List[Dict[str, str]]:
+    if isinstance(value, list):
+        return [ref for ref in value if isinstance(ref, dict)]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [ref for ref in parsed if isinstance(ref, dict)]
+    return []
+
+
+def collect_law_reference_terms(
+    row: pd.Series, analyzer: Optional[LawRevisionAnalyzer] = None
+) -> List[str]:
+    analyzer = analyzer or get_law_revision_analyzer()
+    candidates: List[str] = []
+
+    def append_candidate(value: object) -> None:
+        if value is None:
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                append_candidate(item)
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        tokens = [tok.strip() for tok in re.split(r"[;／/,、]+", text) if tok.strip()]
+        if not tokens:
+            tokens = [text]
+        for token in tokens:
+            if token:
+                candidates.append(token)
+                parts = [part.strip() for part in re.split(r"\s+", token) if part.strip()]
+                for part in parts:
+                    if part != token:
+                        candidates.append(part)
+
+    tags_value = row.get("tags")
+    append_candidate(tags_value)
+    append_candidate(row.get("topic"))
+    append_candidate(row.get("category"))
+    append_candidate(row.get("law_name"))
+
+    question_text = str(row.get("question", "") or "")
+    append_candidate(question_text)
+    if question_text:
+        append_candidate(LAW_NAME_PATTERN.findall(question_text))
+
+    if isinstance(tags_value, str):
+        append_candidate(LAW_NAME_PATTERN.findall(tags_value))
+
+    combined_parts: List[str] = []
+    if question_text:
+        combined_parts.append(question_text)
+    if isinstance(tags_value, str):
+        combined_parts.append(tags_value.replace(";", " "))
+    combined_text = " ".join(part for part in combined_parts if part).strip()
+    if combined_text:
+        keywords = analyzer.extract_keywords(combined_text, limit=8)
+        append_candidate(keywords)
+
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for raw in candidates:
+        normalized_label = normalize_law_reference_label(raw)
+        if not normalized_label:
+            continue
+        if normalized_label in seen:
+            continue
+        seen.add(normalized_label)
+        normalized.append(normalized_label)
+    return normalized
+
+
+def get_outline_insight(row: pd.Series) -> Dict[str, object]:
+    cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(OUTLINE_CACHE_KEY, {})
+    question_id = str(row.get("id", "") or "")
+    if question_id and question_id in cache:
+        return cache[question_id]
+    analyzer = get_law_revision_analyzer()
+    question_text = str(row.get("question", "") or "")
+    tags_text = str(row.get("tags", "") or "")
+    combined = " ".join(
+        part for part in [question_text, tags_text.replace(";", " ")] if part.strip()
+    ).strip()
+    summary = ""
+    if combined:
+        summary = analyzer.summarize(combined, max_sentences=2)
+    if not summary:
+        explanation = row.get("explanation")
+        if pd.notna(explanation):
+            explanation_summary, _ = parse_explanation_sections(str(explanation))
+            summary = explanation_summary
+    summary = (summary or "").strip()
+    if len(summary) > 120:
+        summary = summary[:117] + "…"
+    law_terms = collect_law_reference_terms(row, analyzer=analyzer)
+    references = [
+        {
+            "label": term,
+            "url": LAW_REFERENCE_BASE_URL.format(query=quote_plus(term)),
+        }
+        for term in law_terms
+    ]
+    insight = {"summary": summary, "terms": law_terms, "references": references}
+    if question_id:
+        cache[question_id] = insight
+    return insight
+
+
+def render_explanation_content(row: pd.Series, db: Optional[DBManager] = None) -> None:
     explanation = row.get("explanation", "")
-    summary, sections = parse_explanation_sections(explanation)
+    explanation_summary, sections = parse_explanation_sections(explanation)
+    outline = get_outline_insight(row)
+    outline_summary = outline.get("summary") or explanation_summary
+    references: List[Dict[str, str]] = outline.get("references", [])  # type: ignore[arg-type]
+
+    if outline_summary or references:
+        st.markdown("##### アウトラインサマリー")
+        if outline_summary:
+            st.write(outline_summary)
+        else:
+            st.caption("要約を生成できませんでした。")
+        if references:
+            st.markdown("###### 関連条文候補")
+            for ref in references:
+                label = ref.get("label")
+                url = ref.get("url")
+                if not label or not url:
+                    continue
+                st.markdown(f"- [{label}]({url})")
+
+    saved_notes_df = pd.DataFrame()
+    if db is not None:
+        question_id = str(row.get("id", "") or "")
+        label_value = str(row.get("label", "") or "").strip()
+        if not label_value:
+            year_display = format_year_value(row.get("year"))
+            q_no_display = format_qno_value(row.get("q_no"))
+            if year_display and q_no_display:
+                label_value = f"{year_display} 問{q_no_display}"
+            elif year_display:
+                label_value = year_display
+            elif q_no_display:
+                label_value = f"問{q_no_display}"
+            else:
+                label_value = question_id
+        tags_value = str(row.get("tags") or "") or None
+        can_save = bool(outline_summary or references)
+        if st.button(
+            "アウトラインノートに保存",
+            key=f"outline_save_{question_id}",
+            disabled=not can_save,
+            help="生成された要約と関連リンクをノートとして保存し、学習ログとあわせて振り返れます。"
+            if can_save
+            else "保存する内容がありません。",
+        ):
+            summary_to_save = outline_summary or explanation_summary or "要約なし"
+            db.save_outline_note(
+                question_id=question_id,
+                summary=summary_to_save,
+                references=references,
+                question_label=label_value,
+                tags=tags_value,
+            )
+            st.success("アウトラインノートに保存しました。")
+        if question_id:
+            saved_notes_df = db.fetch_outline_notes(question_id)
+        if not saved_notes_df.empty:
+            with st.expander("保存済みノート", expanded=False):
+                for _, note in saved_notes_df.iterrows():
+                    note_summary = str(note.get("summary", "") or "")
+                    updated_at = note.get("updated_at")
+                    timestamp = ""
+                    if pd.notna(updated_at):
+                        try:
+                            timestamp = pd.to_datetime(updated_at).strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            timestamp = str(updated_at)
+                    st.markdown(f"**{note_summary}**")
+                    if timestamp:
+                        st.caption(f"更新: {timestamp}")
+                    note_refs = parse_reference_list(note.get("law_references"))
+                    links = [
+                        f"[{ref.get('label', '')}]({ref.get('url', '')})"
+                        for ref in note_refs
+                        if ref.get("label") and ref.get("url")
+                    ]
+                    if links:
+                        st.caption(f"関連: {' / '.join(links)}")
+                    note_tags = str(note.get("tags", "") or "").strip()
+                    if note_tags:
+                        st.caption(f"タグ: {note_tags}")
+
     if not explanation:
         st.write("解説が未登録です。『設定 ＞ データ入出力』から解答データを取り込みましょう。")
         return
-    st.markdown(f"**要点版**：{summary}")
+
+    st.markdown(f"**要点版**：{explanation_summary}")
     with st.expander("詳細解説をひらく", expanded=False):
         for label, content in sections:
             if not content:
@@ -1979,7 +2295,7 @@ def render_explanation_content(row: pd.Series) -> None:
                 if preview_row.empty:
                     st.info("選択した問題がデータベースに見つかりません。")
                 else:
-                    render_question_preview(preview_row.iloc[0])
+                    render_question_preview(preview_row.iloc[0], db=db)
 
 
 def estimate_theta(attempts: pd.DataFrame, df: pd.DataFrame) -> Optional[float]:
@@ -2342,6 +2658,8 @@ def render_learning(db: DBManager, df: pd.DataFrame) -> None:
             render_weakness_lane(db, df)
         with review_tabs[1]:
             render_srs(db, parent_nav="学習")
+    st.divider()
+    render_outline_notes_overview(db, df)
 
 
 def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
@@ -2384,6 +2702,73 @@ def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
     result = st.session_state.get("exam_result_本試験モード")
     if result:
         display_exam_result(result)
+
+
+def render_outline_notes_overview(db: DBManager, df: pd.DataFrame) -> None:
+    st.subheader("アウトラインノート")
+    notes_df = db.fetch_outline_notes()
+    if notes_df.empty:
+        st.info("アウトラインノートはまだ保存されていません。解説画面の保存ボタンから作成できます。")
+        return
+    notes_df = notes_df.copy()
+    notes_df["updated_at"] = pd.to_datetime(notes_df.get("updated_at"), errors="coerce")
+    attempts = db.get_attempt_stats()
+    if not attempts.empty and "question_id" in attempts.columns:
+        attempt_counts = attempts.groupby("question_id").size().rename("attempts")
+        notes_df = notes_df.merge(
+            attempt_counts,
+            left_on="question_id",
+            right_index=True,
+            how="left",
+        )
+    else:
+        notes_df["attempts"] = 0
+    notes_df["attempts"] = notes_df["attempts"].fillna(0).astype(int)
+    meta_cols = ["id", "year", "q_no", "category", "topic"]
+    available_meta = [col for col in meta_cols if col in df.columns]
+    if available_meta:
+        metadata = df[available_meta].copy()
+        metadata = metadata.rename(columns={"id": "question_id"})
+        notes_df = notes_df.merge(metadata, on="question_id", how="left")
+    for missing in ["year", "q_no", "category", "topic"]:
+        if missing not in notes_df.columns:
+            notes_df[missing] = pd.NA
+    notes_df["links_display"] = notes_df["law_references"].apply(
+        lambda value: " / ".join(
+            ref.get("label", "")
+            for ref in parse_reference_list(value)
+            if ref.get("label")
+        )
+    )
+    notes_df = notes_df.sort_values("updated_at", ascending=False)
+    notes_df["updated_at_display"] = notes_df["updated_at"].dt.strftime("%Y-%m-%d %H:%M")
+    display_columns = {
+        "question_id": "設問ID",
+        "year": "年度",
+        "q_no": "問番号",
+        "category": "分野",
+        "topic": "論点",
+        "summary": "要約",
+        "links_display": "関連リンク",
+        "attempts": "学習回数",
+        "updated_at_display": "更新日時",
+    }
+    display_df = notes_df[list(display_columns.keys())].rename(columns=display_columns)
+    st.dataframe(display_df, use_container_width=True)
+    st.caption("学習履歴の取り組み回数を併記しています。ノートとログの整合を確認できます。")
+    export_df = notes_df.copy()
+    export_df["law_references"] = export_df["law_references"].apply(
+        lambda value: json.dumps(parse_reference_list(value), ensure_ascii=False)
+    )
+    export_df["updated_at"] = export_df["updated_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    buffer = io.StringIO()
+    export_df.to_csv(buffer, index=False)
+    st.download_button(
+        "アウトラインノートをCSVエクスポート",
+        data=buffer.getvalue(),
+        file_name="outline_notes.csv",
+        mime="text/csv",
+    )
 
 
 def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
@@ -3152,7 +3537,7 @@ def render_exam_session_body(
         row = row_df.iloc[0]
         st.markdown(f"### {row['year']}年 問{row['q_no']}")
         st.markdown(f"**{row['category']} / {row['topic']}**")
-        render_law_reference(row)
+        render_law_reference(row, db=db)
         st.markdown(row["question"], unsafe_allow_html=True)
         options = [row.get(f"choice{i}", "") for i in range(1, 5)]
         option_map = {
@@ -3383,7 +3768,7 @@ def render_question_interaction(
         st.markdown(f"**{category_value}**")
     elif topic_value:
         st.markdown(f"**{topic_value}**")
-    render_law_reference(row)
+    render_law_reference(row, db=db)
     st.markdown(row["question"], unsafe_allow_html=True)
     selected_choice = st.session_state.get(selected_key)
     graded_selected_choice: Optional[int] = None
@@ -3626,7 +4011,7 @@ def render_question_interaction(
         )
     if show_explanation:
         st.markdown("#### 解説")
-        render_explanation_content(row)
+        render_explanation_content(row, db=db)
     if help_visible:
         st.info(
             """ショートカット一覧\n- 1〜4: 選択肢を選ぶ\n- E: 解説の表示/非表示\n- F: 復習フラグの切り替え\n- N/P: 次へ・前へ\n- H: このヘルプ"""
@@ -3731,55 +4116,34 @@ def format_question_label(df: pd.DataFrame, question_id: str) -> str:
 
 
 def build_law_reference_query(row: pd.Series) -> Optional[str]:
-    candidates: List[str] = []
-
-    def append_parts(value: Optional[str]) -> None:
-        if not isinstance(value, str):
-            return
-        parts = re.split(r"[;／/]+", value)
-        for part in parts:
-            part = part.strip()
-            if part:
-                candidates.append(part)
-
-    tags_value = row.get("tags")
-    if isinstance(tags_value, str):
-        tag_parts = [part.strip() for part in tags_value.split(";") if part.strip()]
-        # 検索に不要な年度タグなどを除外する。
-        tag_parts = [part for part in tag_parts if not re.fullmatch(r"R\d+", part, re.IGNORECASE)]
-        for part in tag_parts:
-            append_parts(part)
-    else:
-        append_parts(tags_value)
-
-    append_parts(row.get("topic"))
-    append_parts(row.get("category"))
-
-    seen: Set[str] = set()
-    filtered: List[str] = []
-    for text in candidates:
-        if re.fullmatch(r"R\d+", text, re.IGNORECASE):
-            continue
-        if re.fullmatch(r"\d+", text):
-            continue
-        if text in seen:
-            continue
-        seen.add(text)
-        filtered.append(text)
-
-    if not filtered:
+    insight = get_outline_insight(row)
+    terms = insight.get("terms", [])
+    if not terms:
         return None
+    return " ".join(str(term) for term in terms if term)
 
-    return " ".join(filtered)
 
-
-def render_law_reference(row: pd.Series) -> None:
-    query = build_law_reference_query(row)
+def render_law_reference(row: pd.Series, db: Optional[DBManager] = None) -> None:
+    insight = get_outline_insight(row)
+    terms = insight.get("terms", [])
+    query: Optional[str] = " ".join(terms) if terms else None
+    caption_parts = [LAW_BASELINE_LABEL]
     if query:
         url = LAW_REFERENCE_BASE_URL.format(query=quote_plus(query))
-        st.caption(f"{LAW_BASELINE_LABEL} ｜ [条文検索]({url})")
-    else:
-        st.caption(LAW_BASELINE_LABEL)
+        caption_parts.append(f"[条文検索]({url})")
+    st.caption(" ｜ ".join(caption_parts))
+    summary = insight.get("summary")
+    if summary:
+        st.caption(f"要約: {summary}")
+    references = insight.get("references", [])
+    if references:
+        links = [
+            f"[{ref.get('label', '')}]({ref.get('url', '')})"
+            for ref in references
+            if ref.get("label") and ref.get("url")
+        ]
+        if links:
+            st.caption(f"関連: {' / '.join(links)}")
 
 
 def render_law_revision_metadata(row: pd.Series) -> None:
@@ -3806,8 +4170,8 @@ def render_law_revision_metadata(row: pd.Series) -> None:
         st.caption(" ｜ ".join(details))
 
 
-def render_question_preview(row: pd.Series) -> None:
-    render_law_reference(row)
+def render_question_preview(row: pd.Series, db: Optional[DBManager] = None) -> None:
+    render_law_reference(row, db=db)
     question_text = row.get("question", "")
     if pd.isna(question_text):
         question_text = ""
