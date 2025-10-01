@@ -2348,6 +2348,52 @@ def inject_ui_styles() -> None:
 .takken-feedback-summary strong {
     font-weight: 600;
 }
+.viewerBadge_container__1QSob,
+.viewerBadge_container__1QSob iframe,
+.stDeployButton {
+    position: static !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.takken-app-footer {
+    margin-top: 3rem;
+    padding: 1.5rem 0 2rem;
+    border-top: 1px solid rgba(49, 51, 63, 0.15);
+    color: rgba(49, 51, 63, 0.7);
+    font-size: 0.9rem;
+}
+.takken-app-footer .takken-footer-inner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    justify-content: center;
+}
+.takken-app-footer a {
+    color: inherit;
+    text-decoration: none;
+}
+.takken-app-footer .takken-footer-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.takken-app-footer .takken-footer-badge img {
+    height: 24px;
+}
+@media (max-width: 640px) {
+    .takken-app-footer {
+        margin-top: 2rem;
+        padding: 1.25rem 0 1.75rem;
+    }
+    .takken-app-footer .takken-footer-inner {
+        flex-direction: column;
+    }
+}
 """,
         "takken-ui-styles",
     )
@@ -3248,6 +3294,8 @@ def main() -> None:
     elif nav == "設定":
         render_settings(db)
 
+    render_app_footer()
+
 
 def render_home(db: DBManager, df: pd.DataFrame) -> None:
     st.markdown(
@@ -3369,6 +3417,21 @@ def render_learning(db: DBManager, df: pd.DataFrame) -> None:
             render_srs(db, parent_nav="学習")
     st.divider()
     render_outline_notes_overview(db, df)
+
+
+def render_app_footer() -> None:
+    current_year = dt.datetime.now().year
+    footer_html = f"""
+    <footer class="takken-app-footer" role="contentinfo">
+        <div class="takken-footer-inner">
+            <span>© {{year}} 宅建10年ドリル</span>
+            <a class="takken-footer-badge" href="https://streamlit.io/" target="_blank" rel="noopener noreferrer" aria-label="Streamlit 公式サイトへ">
+                <img src="https://static.streamlit.io/badges/streamlit_badge_black_white.svg" alt="Built with Streamlit">
+            </a>
+        </div>
+    </footer>
+    """.replace("{{year}}", str(current_year))
+    st.markdown(footer_html, unsafe_allow_html=True)
 
 
 def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
