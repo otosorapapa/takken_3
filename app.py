@@ -657,13 +657,33 @@ class DBManager:
         return df
 
     def upsert_questions(self, df: pd.DataFrame) -> Tuple[int, int]:
+        return self.bulk_upsert_questions(df)
+
+    def bulk_upsert_questions(
+        self,
+        df: pd.DataFrame,
+        batch_size: int = 200,
+        on_progress: Optional[Callable[[int, int], None]] = None,
+    ) -> Tuple[int, int]:
         records = df.to_dict(orient="records")
+        total = len(records)
+        if total == 0:
+            if on_progress is not None:
+                try:
+                    on_progress(0, 0)
+                except Exception:
+                    logger.exception("Progress callback failed during empty bulk upsert")
+            return 0, 0
+
         ids = [rec["id"] for rec in records if "id" in rec]
         year_qno_pairs = {
             (rec["year"], rec["q_no"]) for rec in records if "year" in rec and "q_no" in rec
         }
+
         inserted = 0
         updated = 0
+        processed = 0
+
         with self.engine.begin() as conn:
             if ids:
                 existing_ids: Set[str] = set(
@@ -692,33 +712,43 @@ class DBManager:
             else:
                 existing_pairs = {}
 
-            for rec in records:
-                rec_id = rec.get("id")
-                year_qno = (rec.get("year"), rec.get("q_no"))
-                update_values = {k: v for k, v in rec.items() if k != "id"}
+            for start in range(0, total, max(batch_size, 1)):
+                batch = records[start : start + max(batch_size, 1)]
+                for rec in batch:
+                    rec_id = rec.get("id")
+                    year_qno = (rec.get("year"), rec.get("q_no"))
+                    update_values = {k: v for k, v in rec.items() if k != "id"}
 
-                if rec_id in existing_ids:
-                    conn.execute(
-                        update(questions_table)
-                        .where(questions_table.c.id == rec_id)
-                        .values(**update_values)
-                    )
-                    updated += 1
-                elif year_qno in existing_pairs:
-                    existing_id = existing_pairs[year_qno]
-                    conn.execute(
-                        update(questions_table)
-                        .where(questions_table.c.id == existing_id)
-                        .values(**update_values)
-                    )
-                    updated += 1
-                else:
-                    conn.execute(sa_insert(questions_table).values(**rec))
-                    inserted += 1
-                    if rec_id:
-                        existing_ids.add(rec_id)
-                    if None not in year_qno:
-                        existing_pairs[year_qno] = rec_id
+                    if rec_id in existing_ids:
+                        conn.execute(
+                            update(questions_table)
+                            .where(questions_table.c.id == rec_id)
+                            .values(**update_values)
+                        )
+                        updated += 1
+                    elif year_qno in existing_pairs:
+                        existing_id = existing_pairs[year_qno]
+                        conn.execute(
+                            update(questions_table)
+                            .where(questions_table.c.id == existing_id)
+                            .values(**update_values)
+                        )
+                        updated += 1
+                    else:
+                        conn.execute(sa_insert(questions_table).values(**rec))
+                        inserted += 1
+                        if rec_id:
+                            existing_ids.add(rec_id)
+                        if None not in year_qno:
+                            existing_pairs[year_qno] = rec_id
+
+                processed += len(batch)
+                if on_progress is not None:
+                    try:
+                        on_progress(processed, total)
+                    except Exception:
+                        logger.exception("Progress callback failed during bulk upsert")
+
         return inserted, updated
 
     def upsert_predicted_questions(self, df: pd.DataFrame) -> Tuple[int, int]:
@@ -4172,6 +4202,25 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     render_specialized_header(parent_nav, "データ入出力", "data_io")
     st.subheader("データ入出力")
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    import_notifications = st.session_state.setdefault("import_notifications", [])
+    if import_notifications:
+        st.markdown("### インポート履歴 (このセッション)")
+        history_df = pd.DataFrame(import_notifications)
+        ordered_columns = [
+            col
+            for col in ["timestamp", "inserted", "updated", "rejected", "seconds"]
+            if col in history_df.columns
+        ]
+        display_df = history_df[ordered_columns].rename(
+            columns={
+                "timestamp": "完了時刻",
+                "inserted": "追加",
+                "updated": "更新",
+                "rejected": "リジェクト",
+                "seconds": "処理秒数",
+            }
+        )
+        st.dataframe(display_df, use_container_width=True)
     st.markdown("### テンプレートファイル")
     st.download_button(
         "テンプレートをダウンロード (ZIP)",
@@ -4666,9 +4715,18 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
 
     if st.button("(4) 統合 (UPSERT) 実行"):
         started = dt.datetime.now()
-        progress = st.progress(0)
-        inserted, updated = db.upsert_questions(merged)
-        progress.progress(70)
+        progress = st.progress(0.0)
+
+        def handle_progress(processed: int, total: int) -> None:
+            if total <= 0:
+                ratio = 1.0
+            else:
+                ratio = processed / total
+            progress.progress(min(max(ratio, 0.0), 1.0))
+
+        inserted, updated = db.bulk_upsert_questions(
+            merged, batch_size=200, on_progress=handle_progress
+        )
         finished = dt.datetime.now()
         seconds = (finished - started).total_seconds()
         policy_payload = {**policy, "conflict_resolutions": conflict_resolutions}
@@ -4686,12 +4744,26 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
             }
         )
         rebuild_tfidf_cache()
-        progress.progress(100)
+        progress.progress(1.0)
         rejected_total = len(rejects_a) + len(rejects_q)
         st.success(
             "インポートが完了しました。"
             f" 追加 {inserted} 件 / 更新 {updated} 件 / リジェクト {rejected_total} 件。"
             " TF-IDFを再構築しました。"
+        )
+        notification = {
+            "timestamp": finished.strftime("%Y-%m-%d %H:%M:%S"),
+            "inserted": inserted,
+            "updated": updated,
+            "rejected": rejected_total,
+            "seconds": round(seconds, 2),
+        }
+        import_notifications.insert(0, notification)
+        if len(import_notifications) > 20:
+            del import_notifications[20:]
+        st.toast(
+            f"設問インポート完了: 追加 {inserted} 件 / 更新 {updated} 件 / リジェクト {rejected_total} 件",
+            icon="✅",
         )
         if file_summaries:
             summary_rows = [
