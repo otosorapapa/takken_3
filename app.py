@@ -4,6 +4,7 @@ import io
 import json
 import random
 import re
+import string
 import time
 import zipfile
 from dataclasses import dataclass
@@ -82,6 +83,56 @@ SUBJECT_PRESETS = {
     },
 }
 
+LEVEL_BASE_XP = 120
+LEVEL_GROWTH = 0.18
+
+BADGE_DEFINITIONS = [
+    {
+        "code": "first_correct",
+        "name": "初陣クリア",
+        "description": "初めての正答を記録すると獲得できます。",
+        "criterion": "correct_count",
+        "threshold": 1,
+    },
+    {
+        "code": "streak_5",
+        "name": "5連勝マスター",
+        "description": "5問連続正解を達成しました。",
+        "criterion": "streak",
+        "threshold": 5,
+    },
+    {
+        "code": "streak_10",
+        "name": "10連勝チャンピオン",
+        "description": "10問連続正解の快挙です。",
+        "criterion": "streak",
+        "threshold": 10,
+    },
+    {
+        "code": "xp_500",
+        "name": "XP500到達",
+        "description": "累計XPが500を超えました。",
+        "criterion": "xp_total",
+        "threshold": 500,
+    },
+    {
+        "code": "attempts_100",
+        "name": "100トライ",
+        "description": "累計100問に挑戦しました。",
+        "criterion": "attempt_count",
+        "threshold": 100,
+    },
+]
+
+
+def generate_anonymous_code(length: int = 6) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(random.choices(alphabet, k=length))
+
+
+def build_anonymous_name(code: str) -> str:
+    return f"挑戦者#{code}"
+
 metadata = MetaData()
 
 questions_table = Table(
@@ -155,6 +206,7 @@ attempts_table = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("question_id", String, nullable=False),
+    Column("user_id", Integer, nullable=True),
     Column("selected", Integer),
     Column("is_correct", Integer),
     Column("seconds", Integer),
@@ -162,7 +214,51 @@ attempts_table = Table(
     Column("exam_id", Integer),
     Column("confidence", Integer),
     Column("grade", Integer),
+    Column("xp_awarded", Integer, default=0),
+    Column("streak_after", Integer, default=0),
     Column("created_at", DateTime, server_default=func.now()),
+)
+
+user_profiles_table = Table(
+    "user_profiles",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("nickname", String, nullable=False),
+    Column("public_name", String, nullable=False),
+    Column("anonymous_code", String),
+    Column("use_anonymous", Integer, default=1),
+    Column("leaderboard_opt_in", Integer, default=1),
+    Column("xp_total", Integer, default=0),
+    Column("level", Integer, default=1),
+    Column("streak_current", Integer, default=0),
+    Column("streak_longest", Integer, default=0),
+    Column("attempt_count", Integer, default=0),
+    Column("correct_count", Integer, default=0),
+    Column("created_at", DateTime, server_default=func.now()),
+    Column("updated_at", DateTime, server_default=func.now(), onupdate=func.now()),
+)
+
+badges_table = Table(
+    "badges",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("code", String, nullable=False, unique=True),
+    Column("name", String, nullable=False),
+    Column("description", String, nullable=False),
+    Column("criterion", String, nullable=False),
+    Column("threshold", Integer, nullable=False),
+    Column("payload", JSON),
+    Column("created_at", DateTime, server_default=func.now()),
+)
+
+user_badges_table = Table(
+    "user_badges",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=False),
+    Column("badge_id", Integer, nullable=False),
+    Column("earned_at", DateTime, server_default=func.now()),
+    UniqueConstraint("user_id", "badge_id", name="uq_user_badges"),
 )
 
 exams_table = Table(
@@ -260,10 +356,6 @@ def ensure_schema_migrations(engine: Engine) -> None:
                 table.create(conn)
                 existing_tables.add(table.name)
 
-        if attempts_table.name not in existing_tables:
-            attempts_table.create(conn)
-            existing_tables.add(attempts_table.name)
-
         conn_inspector = inspect(conn)
         attempt_columns = {col["name"] for col in conn_inspector.get_columns("attempts")}
 
@@ -271,6 +363,96 @@ def ensure_schema_migrations(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE attempts ADD COLUMN confidence INTEGER"))
         if "grade" not in attempt_columns:
             conn.execute(text("ALTER TABLE attempts ADD COLUMN grade INTEGER"))
+        if "user_id" not in attempt_columns:
+            conn.execute(text("ALTER TABLE attempts ADD COLUMN user_id INTEGER"))
+            conn.execute(text("UPDATE attempts SET user_id = 1 WHERE user_id IS NULL"))
+        if "xp_awarded" not in attempt_columns:
+            conn.execute(text("ALTER TABLE attempts ADD COLUMN xp_awarded INTEGER DEFAULT 0"))
+            conn.execute(text("UPDATE attempts SET xp_awarded = 0 WHERE xp_awarded IS NULL"))
+        if "streak_after" not in attempt_columns:
+            conn.execute(text("ALTER TABLE attempts ADD COLUMN streak_after INTEGER DEFAULT 0"))
+            conn.execute(text("UPDATE attempts SET streak_after = 0 WHERE streak_after IS NULL"))
+
+        profile_columns = set()
+        if "user_profiles" in existing_tables:
+            profile_columns = {
+                col["name"] for col in conn_inspector.get_columns("user_profiles")
+            }
+            profile_alterations = [
+                ("public_name", "ALTER TABLE user_profiles ADD COLUMN public_name TEXT"),
+                ("anonymous_code", "ALTER TABLE user_profiles ADD COLUMN anonymous_code TEXT"),
+                ("use_anonymous", "ALTER TABLE user_profiles ADD COLUMN use_anonymous INTEGER DEFAULT 1"),
+                (
+                    "leaderboard_opt_in",
+                    "ALTER TABLE user_profiles ADD COLUMN leaderboard_opt_in INTEGER DEFAULT 1",
+                ),
+                ("xp_total", "ALTER TABLE user_profiles ADD COLUMN xp_total INTEGER DEFAULT 0"),
+                ("level", "ALTER TABLE user_profiles ADD COLUMN level INTEGER DEFAULT 1"),
+                (
+                    "streak_current",
+                    "ALTER TABLE user_profiles ADD COLUMN streak_current INTEGER DEFAULT 0",
+                ),
+                (
+                    "streak_longest",
+                    "ALTER TABLE user_profiles ADD COLUMN streak_longest INTEGER DEFAULT 0",
+                ),
+                (
+                    "attempt_count",
+                    "ALTER TABLE user_profiles ADD COLUMN attempt_count INTEGER DEFAULT 0",
+                ),
+                (
+                    "correct_count",
+                    "ALTER TABLE user_profiles ADD COLUMN correct_count INTEGER DEFAULT 0",
+                ),
+                (
+                    "updated_at",
+                    "ALTER TABLE user_profiles ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+                ),
+            ]
+            for column, ddl in profile_alterations:
+                if column not in profile_columns:
+                    conn.execute(text(ddl))
+
+        existing_tables = existing_tables | {table.name for table in metadata.sorted_tables}
+
+        badge_codes = set()
+        if "badges" in existing_tables:
+            badge_codes = set(conn.execute(select(badges_table.c.code)).scalars())
+            for badge in BADGE_DEFINITIONS:
+                if badge["code"] not in badge_codes:
+                    conn.execute(sa_insert(badges_table).values(**badge))
+
+        if "user_profiles" in existing_tables:
+            profile = conn.execute(select(user_profiles_table).limit(1)).mappings().first()
+            if profile is None:
+                code = generate_anonymous_code()
+                conn.execute(
+                    sa_insert(user_profiles_table).values(
+                        nickname="マイプロフィール",
+                        public_name=build_anonymous_name(code),
+                        anonymous_code=code,
+                        use_anonymous=1,
+                        leaderboard_opt_in=1,
+                        xp_total=0,
+                        level=1,
+                        streak_current=0,
+                        streak_longest=0,
+                        attempt_count=0,
+                        correct_count=0,
+                    )
+                )
+            else:
+                code = profile.get("anonymous_code")
+                if not code:
+                    code = generate_anonymous_code()
+                    update_payload = {"anonymous_code": code}
+                    if profile.get("use_anonymous", 1):
+                        update_payload["public_name"] = build_anonymous_name(code)
+                    conn.execute(
+                        update(user_profiles_table)
+                        .where(user_profiles_table.c.id == profile["id"])
+                        .values(**update_payload)
+                    )
 
 
 def apply_user_preferences() -> None:
@@ -543,6 +725,255 @@ class DBManager:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
+    @staticmethod
+    def level_threshold(level: int) -> int:
+        growth_multiplier = 1 + LEVEL_GROWTH * max(level - 1, 0)
+        return max(20, int(round(LEVEL_BASE_XP * growth_multiplier)))
+
+    @classmethod
+    def compute_level_from_xp(cls, xp_total: int) -> Dict[str, int]:
+        level = 1
+        remaining = max(int(xp_total or 0), 0)
+        threshold = cls.level_threshold(level)
+        while remaining >= threshold:
+            remaining -= threshold
+            level += 1
+            threshold = cls.level_threshold(level)
+        xp_into_level = remaining
+        xp_to_next = max(threshold - xp_into_level, 0)
+        return {
+            "level": level,
+            "xp_into_level": xp_into_level,
+            "xp_to_next": xp_to_next,
+            "current_threshold": threshold,
+        }
+
+    @staticmethod
+    def calculate_xp_reward(
+        is_correct: bool,
+        streak_after: int,
+        confidence: Optional[int],
+        seconds: Optional[int],
+    ) -> int:
+        base = 15 if is_correct else 5
+        streak_bonus = 0
+        if is_correct:
+            streak_bonus = min(6, streak_after)
+            if streak_after in {5, 10, 20, 30}:
+                streak_bonus += 12
+        confidence_bonus = 0
+        if confidence is not None and is_correct:
+            confidence_bonus = max(0, int((confidence - 60) / 20))
+        speed_bonus = 0
+        if seconds is not None and seconds > 0 and seconds <= 75 and is_correct:
+            speed_bonus = 2
+        xp = base + streak_bonus + confidence_bonus + speed_bonus
+        return max(xp, 1)
+
+    def _ensure_user_profile(self, conn) -> Dict[str, object]:
+        profile = conn.execute(select(user_profiles_table).limit(1)).mappings().first()
+        if profile is None:
+            code = generate_anonymous_code()
+            result = conn.execute(
+                sa_insert(user_profiles_table).values(
+                    nickname="マイプロフィール",
+                    public_name=build_anonymous_name(code),
+                    anonymous_code=code,
+                    use_anonymous=1,
+                    leaderboard_opt_in=1,
+                    xp_total=0,
+                    level=1,
+                    streak_current=0,
+                    streak_longest=0,
+                    attempt_count=0,
+                    correct_count=0,
+                )
+            )
+            profile_id = result.inserted_primary_key[0]
+            profile = conn.execute(
+                select(user_profiles_table).where(user_profiles_table.c.id == profile_id)
+            ).mappings().first()
+        elif not profile.get("anonymous_code"):
+            code = generate_anonymous_code()
+            update_payload = {"anonymous_code": code}
+            if profile.get("use_anonymous", 1):
+                update_payload["public_name"] = build_anonymous_name(code)
+            conn.execute(
+                update(user_profiles_table)
+                .where(user_profiles_table.c.id == profile["id"])
+                .values(**update_payload)
+            )
+            profile = conn.execute(
+                select(user_profiles_table).where(user_profiles_table.c.id == profile["id"])
+            ).mappings().first()
+        return dict(profile)
+
+    def get_user_profile(self) -> Dict[str, object]:
+        with self.engine.begin() as conn:
+            profile = self._ensure_user_profile(conn)
+        return profile
+
+    def update_user_profile(self, fields: Dict[str, object]) -> None:
+        if not fields:
+            return
+        update_payload = fields.copy()
+        if "leaderboard_opt_in" in update_payload:
+            update_payload["leaderboard_opt_in"] = int(bool(update_payload["leaderboard_opt_in"]))
+        if "use_anonymous" in update_payload:
+            update_payload["use_anonymous"] = int(bool(update_payload["use_anonymous"]))
+        with self.engine.begin() as conn:
+            profile = self._ensure_user_profile(conn)
+            conn.execute(
+                update(user_profiles_table)
+                .where(user_profiles_table.c.id == profile["id"])
+                .values(**update_payload, updated_at=dt.datetime.now())
+            )
+
+    def regenerate_anonymous_identity(self) -> Dict[str, object]:
+        with self.engine.begin() as conn:
+            profile = self._ensure_user_profile(conn)
+            code = generate_anonymous_code()
+            payload: Dict[str, object] = {"anonymous_code": code, "updated_at": dt.datetime.now()}
+            if profile.get("use_anonymous", 1):
+                payload["public_name"] = build_anonymous_name(code)
+            conn.execute(
+                update(user_profiles_table)
+                .where(user_profiles_table.c.id == profile["id"])
+                .values(**payload)
+            )
+            profile = conn.execute(
+                select(user_profiles_table).where(user_profiles_table.c.id == profile["id"])
+            ).mappings().first()
+        return dict(profile or {})
+
+    def _assign_badges(
+        self,
+        conn,
+        user_id: int,
+        stats: Dict[str, int],
+    ) -> List[Dict[str, object]]:
+        badges = conn.execute(select(badges_table)).mappings().all()
+        earned_codes = set(
+            conn.execute(
+                select(badges_table.c.code)
+                .select_from(
+                    user_badges_table.join(
+                        badges_table, user_badges_table.c.badge_id == badges_table.c.id
+                    )
+                )
+                .where(user_badges_table.c.user_id == user_id)
+            ).scalars()
+        )
+        awarded: List[Dict[str, object]] = []
+        for badge in badges:
+            if badge["code"] in earned_codes:
+                continue
+            criterion = badge.get("criterion")
+            threshold = badge.get("threshold", 0)
+            if criterion == "streak":
+                value = stats.get("streak_current", 0)
+            else:
+                value = stats.get(criterion or "", 0)
+            if value is None:
+                continue
+            if int(value) >= int(threshold):
+                conn.execute(
+                    sa_insert(user_badges_table).values(
+                        user_id=user_id,
+                        badge_id=badge["id"],
+                        earned_at=dt.datetime.now(),
+                    )
+                )
+                awarded.append(dict(badge))
+        return awarded
+
+    def get_user_badges(self) -> pd.DataFrame:
+        with self.engine.connect() as conn:
+            stmt = (
+                select(
+                    user_badges_table.c.user_id,
+                    user_badges_table.c.earned_at,
+                    badges_table.c.code,
+                    badges_table.c.name,
+                    badges_table.c.description,
+                )
+                .select_from(
+                    user_badges_table.join(
+                        badges_table, user_badges_table.c.badge_id == badges_table.c.id
+                    )
+                )
+                .order_by(user_badges_table.c.earned_at.desc())
+            )
+            try:
+                df = pd.read_sql(stmt, conn)
+            except OperationalError:
+                return pd.DataFrame(columns=["code", "name", "description", "earned_at"])
+        return df
+
+    def get_weekly_leaderboard(self, weeks: int = 8) -> pd.DataFrame:
+        attempts = self.get_attempt_stats()
+        if attempts.empty:
+            return pd.DataFrame()
+        try:
+            attempts["created_at"] = pd.to_datetime(attempts["created_at"])
+        except Exception:
+            return pd.DataFrame()
+        cutoff = dt.datetime.now() - dt.timedelta(weeks=weeks)
+        attempts = attempts[attempts["created_at"] >= cutoff]
+        if attempts.empty:
+            return pd.DataFrame()
+        attempts["xp_awarded"] = pd.to_numeric(attempts.get("xp_awarded"), errors="coerce").fillna(0)
+        attempts["is_correct"] = pd.to_numeric(attempts.get("is_correct"), errors="coerce").fillna(0)
+        attempts["week_period"] = attempts["created_at"].dt.to_period("W-MON")
+        attempts["week_start"] = attempts["week_period"].apply(lambda p: p.start_time.date())
+
+        grouped = (
+            attempts.groupby(["week_start", "user_id"])
+            .agg(
+                xp_gained=("xp_awarded", "sum"),
+                correct_count=("is_correct", "sum"),
+                attempts=("xp_awarded", "count"),
+            )
+            .reset_index()
+        )
+        if grouped.empty:
+            return pd.DataFrame()
+
+        with self.engine.connect() as conn:
+            user_df = pd.read_sql(
+                select(
+                    user_profiles_table.c.id,
+                    user_profiles_table.c.public_name,
+                    user_profiles_table.c.leaderboard_opt_in,
+                ),
+                conn,
+            )
+        if user_df.empty:
+            return pd.DataFrame()
+        user_df["leaderboard_opt_in"] = user_df["leaderboard_opt_in"].fillna(0).astype(int)
+        grouped = grouped.merge(user_df, left_on="user_id", right_on="id", how="left")
+        grouped = grouped[grouped["leaderboard_opt_in"] == 1]
+        if grouped.empty:
+            return pd.DataFrame()
+
+        grouped = grouped.sort_values(["week_start", "xp_gained"], ascending=[False, False])
+        grouped["rank"] = grouped.groupby("week_start")["xp_gained"].rank(
+            method="dense", ascending=False
+        )
+        grouped = grouped.rename(columns={"public_name": "display_name"})
+        grouped["xp_gained"] = grouped["xp_gained"].round().astype(int)
+        grouped["correct_count"] = grouped["correct_count"].round().astype(int)
+        grouped["attempts"] = grouped["attempts"].astype(int)
+        return grouped[[
+            "week_start",
+            "user_id",
+            "display_name",
+            "xp_gained",
+            "correct_count",
+            "attempts",
+            "rank",
+        ]]
+
     def load_dataframe(self, table: Table) -> pd.DataFrame:
         try:
             with self.engine.connect() as conn:
@@ -703,11 +1134,23 @@ class DBManager:
         exam_id: Optional[int] = None,
         confidence: Optional[int] = None,
         grade: Optional[int] = None,
-    ) -> None:
+    ) -> Dict[str, object]:
         with self.engine.begin() as conn:
+            profile = self._ensure_user_profile(conn)
+            user_id = profile["id"]
+            current_streak = int(profile.get("streak_current") or 0)
+            new_streak = current_streak + 1 if is_correct else 0
+            xp_gain = self.calculate_xp_reward(is_correct, new_streak, confidence, seconds)
+            xp_total = int(profile.get("xp_total") or 0) + xp_gain
+            attempt_count = int(profile.get("attempt_count") or 0) + 1
+            correct_count = int(profile.get("correct_count") or 0) + (1 if is_correct else 0)
+            longest_streak = max(int(profile.get("streak_longest") or 0), new_streak)
+            level_info = self.compute_level_from_xp(xp_total)
+
             conn.execute(
                 sa_insert(attempts_table).values(
                     question_id=question_id,
+                    user_id=user_id,
                     selected=selected,
                     is_correct=int(is_correct),
                     seconds=seconds,
@@ -715,8 +1158,37 @@ class DBManager:
                     exam_id=exam_id,
                     confidence=confidence,
                     grade=grade,
+                    xp_awarded=xp_gain,
+                    streak_after=new_streak,
                 )
             )
+
+            conn.execute(
+                update(user_profiles_table)
+                .where(user_profiles_table.c.id == user_id)
+                .values(
+                    xp_total=xp_total,
+                    level=level_info["level"],
+                    streak_current=new_streak,
+                    streak_longest=longest_streak,
+                    attempt_count=attempt_count,
+                    correct_count=correct_count,
+                    updated_at=dt.datetime.now(),
+                )
+            )
+
+            stats = {
+                "xp_total": xp_total,
+                "streak_current": new_streak,
+                "attempt_count": attempt_count,
+                "correct_count": correct_count,
+            }
+            awarded_badges = self._assign_badges(conn, user_id, stats)
+        return {
+            "xp_awarded": xp_gain,
+            "badges": awarded_badges,
+            "level": level_info["level"],
+        }
 
     def fetch_srs(self, question_id: str) -> Optional[pd.Series]:
         with self.engine.connect() as conn:
@@ -755,6 +1227,7 @@ class DBManager:
                     """
                     SELECT
                         a.question_id,
+                        a.user_id,
                         q.category,
                         q.topic,
                         q.year,
@@ -764,7 +1237,9 @@ class DBManager:
                         a.selected,
                         a.mode,
                         a.confidence,
-                        a.grade
+                        a.grade,
+                        a.xp_awarded,
+                        a.streak_after
                     FROM attempts a
                     JOIN questions q ON q.id = a.question_id
                     """
@@ -869,6 +1344,40 @@ def compute_similarity(target_id: str, top_n: int = 3) -> pd.DataFrame:
     df = df.assign(similarity=sims)
     df = df[df["id"] != target_id].nlargest(top_n, "similarity")
     return df[["id", "year", "q_no", "category", "question", "similarity"]]
+
+
+def compute_pass_prediction(
+    attempts: pd.DataFrame,
+    window: int = 120,
+    pass_line: float = 0.7,
+) -> Optional[Dict[str, float]]:
+    if attempts.empty or "is_correct" not in attempts.columns:
+        return None
+    df = attempts.copy()
+    try:
+        df["created_at"] = pd.to_datetime(df["created_at"])
+    except Exception:
+        pass
+    df = df.sort_values("created_at")
+    if len(df) > window:
+        df = df.tail(window)
+    try:
+        df["is_correct"] = pd.to_numeric(df["is_correct"], errors="coerce")
+    except Exception:
+        return None
+    accuracy_series = df["is_correct"].dropna()
+    if accuracy_series.empty:
+        return None
+    accuracy = float(accuracy_series.mean())
+    expected_score = accuracy * 50
+    slope = 12.0
+    pass_probability = 1 / (1 + np.exp(-slope * (accuracy - pass_line)))
+    return {
+        "accuracy": accuracy,
+        "expected_score": expected_score,
+        "pass_probability": float(pass_probability),
+        "sample_size": int(len(df)),
+    }
 
 
 def normalize_questions(df: pd.DataFrame, mapping: Optional[Dict[str, str]] = None) -> pd.DataFrame:
@@ -1999,6 +2508,60 @@ def store_uploaded_file(file: "UploadedFile", timestamp: str) -> Path:
     return path
 
 
+def render_sidebar_community_settings(sidebar, db: DBManager) -> None:
+    profile = db.get_user_profile()
+    anonymous_name = build_anonymous_name(profile.get("anonymous_code", generate_anonymous_code()))
+    with sidebar.expander("コミュニティ設定", expanded=False):
+        st.caption("週間ランキングの表示名や公開範囲を調整できます。")
+        with st.form("community_settings_form"):
+            nickname = st.text_input(
+                "ニックネーム（自分用）",
+                value=profile.get("nickname", ""),
+                max_chars=24,
+            )
+            use_anonymous = st.checkbox(
+                "匿名ニックネームを使用する",
+                value=bool(profile.get("use_anonymous", 1)),
+                help="オンにすると匿名IDがリーダーボードに表示されます。",
+            )
+            st.text_input("匿名ニックネーム", value=anonymous_name, disabled=True)
+            public_name = st.text_input(
+                "公開ニックネーム",
+                value=profile.get("public_name", anonymous_name),
+                max_chars=24,
+                disabled=use_anonymous,
+                help="リーダーボードに表示される名前です。",
+            )
+            leaderboard_opt_in = st.checkbox(
+                "週間ランキングに参加する",
+                value=bool(profile.get("leaderboard_opt_in", 1)),
+            )
+            col_save, col_regen = st.columns([2, 1])
+            submitted = col_save.form_submit_button("設定を保存")
+            regen_clicked = col_regen.form_submit_button("匿名IDを再発行", type="secondary")
+        if regen_clicked:
+            db.regenerate_anonymous_identity()
+            st.success("匿名ニックネームを更新しました。")
+            safe_rerun()
+        if submitted:
+            nickname_value = nickname.strip() or profile.get("nickname", "マイプロフィール")
+            updates: Dict[str, object] = {
+                "nickname": nickname_value,
+                "use_anonymous": use_anonymous,
+                "leaderboard_opt_in": leaderboard_opt_in,
+            }
+            if use_anonymous:
+                updates["public_name"] = anonymous_name
+            else:
+                updates["public_name"] = public_name.strip() or profile.get(
+                    "public_name", anonymous_name
+                )
+            db.update_user_profile(updates)
+            st.success("コミュニティ設定を保存しました。")
+            safe_rerun()
+
+
+
 def init_session_state() -> None:
     defaults = {
         "nav": "ホーム",
@@ -2074,6 +2637,7 @@ def main() -> None:
                 ]
             )
         )
+    render_sidebar_community_settings(sidebar, db)
 
     if nav == "ホーム":
         render_home(db, df)
@@ -2097,20 +2661,103 @@ def main() -> None:
 
 def render_home(db: DBManager, df: pd.DataFrame) -> None:
     st.title("ホーム")
+    profile = db.get_user_profile()
     attempts = db.get_attempt_stats()
-    st.markdown("### サマリー")
+    level_info = db.compute_level_from_xp(profile.get("xp_total", 0))
+    xp_total = int(profile.get("xp_total") or 0)
+    xp_threshold = max(level_info.get("current_threshold", LEVEL_BASE_XP), 1)
+    xp_ratio = min(max(level_info.get("xp_into_level", 0) / xp_threshold, 0.0), 1.0)
+    xp_to_next = level_info.get("xp_to_next", xp_threshold)
+
+    st.markdown("### プレイヤーステータス")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("設問数", len(df))
+        st.metric("レベル", level_info.get("level", 1))
     with col2:
-        st.metric("学習履歴", len(attempts))
+        st.metric("累計XP", f"{xp_total:,} XP", delta=f"次のレベルまで {int(xp_to_next):,} XP")
     with col3:
-        coverage = attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
+        current_streak = int(profile.get("streak_current") or 0)
+        best_streak = int(profile.get("streak_longest") or 0)
+        st.metric("連続正答", f"{current_streak} 問", delta=f"ベスト {best_streak} 問")
+    st.progress(xp_ratio)
+    st.caption(
+        f"レベル{level_info.get('level', 1)}：{int(level_info.get('xp_into_level', 0)):,}/{xp_threshold:,} XP"
+    )
+
+    st.markdown("### 学習サマリー")
+    summary_cols = st.columns(3)
+    with summary_cols[0]:
+        st.metric("設問数", len(df))
+    with summary_cols[1]:
+        st.metric("学習履歴", len(attempts))
+    with summary_cols[2]:
+        coverage = (
+            attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
+        )
         st.metric("年度カバレッジ", f"{coverage:.0f}%")
-    st.info("過去問データと解答データをアップロードして学習を開始しましょう。サイドバーの『データ入出力』から取り込めます。")
+    if attempts.empty:
+        st.info("過去問データと解答データをアップロードして学習を開始しましょう。サイドバーの『データ入出力』から取り込めます。")
+
+    st.markdown("### 合格予測スコア")
+    prediction = compute_pass_prediction(attempts)
+    if prediction:
+        st.metric(
+            "期待得点",
+            f"{prediction['expected_score']:.1f} 点",
+            delta=f"合格率 {prediction['pass_probability'] * 100:.0f}%",
+        )
+        st.caption(
+            f"直近正答率 {prediction['accuracy'] * 100:.1f}%（サンプル {prediction['sample_size']} 問）"
+        )
+    else:
+        st.write("学習履歴が一定数に達すると合格予測が表示されます。まずは演習を進めてみましょう。")
+
+    st.markdown("### 週間ランキング")
+    leaderboard = db.get_weekly_leaderboard()
+    if leaderboard.empty:
+        st.write("ランキングデータはまだありません。")
+    else:
+        leaderboard["week_start"] = pd.to_datetime(leaderboard["week_start"])
+        latest_week = leaderboard["week_start"].max()
+        latest_df = leaderboard[leaderboard["week_start"] == latest_week].copy()
+        latest_df = latest_df.sort_values("rank")
+        latest_df["week"] = latest_df["week_start"].dt.strftime("%Y-%m-%d")
+        display_df = latest_df[[
+            "rank",
+            "display_name",
+            "xp_gained",
+            "correct_count",
+            "attempts",
+        ]].rename(
+            columns={
+                "rank": "順位",
+                "display_name": "ニックネーム",
+                "xp_gained": "獲得XP",
+                "correct_count": "正答数",
+                "attempts": "挑戦数",
+            }
+        )
+        display_df["獲得XP"] = display_df["獲得XP"].astype(int)
+        display_df["正答数"] = display_df["正答数"].astype(int)
+        display_df["挑戦数"] = display_df["挑戦数"].astype(int)
+        st.caption(f"{latest_week.strftime('%Y-%m-%d')} 週のXPランキング")
+        st.dataframe(display_df, use_container_width=True)
+
+    st.markdown("### 獲得バッジ")
+    badges_df = db.get_user_badges()
+    if badges_df.empty:
+        st.write("まだバッジを獲得していません。演習を進めて実績を積み上げましょう。")
+    else:
+        badges_df = badges_df.rename(
+            columns={"name": "バッジ", "description": "説明", "earned_at": "獲得日時"}
+        )
+        st.dataframe(badges_df[["バッジ", "説明", "獲得日時"]], use_container_width=True)
+
     st.markdown("### 最近のインポート")
     with db.engine.connect() as conn:
-        logs = pd.read_sql(select(import_logs_table).order_by(import_logs_table.c.id.desc()).limit(5), conn)
+        logs = pd.read_sql(
+            select(import_logs_table).order_by(import_logs_table.c.id.desc()).limit(5), conn
+        )
     if logs.empty:
         st.write("インポート履歴がありません。")
     else:
