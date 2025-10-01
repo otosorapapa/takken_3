@@ -4,6 +4,7 @@ import html as html_module
 import io
 import json
 import logging
+import math
 import random
 import re
 import time
@@ -4397,9 +4398,51 @@ def render_exam_session_body(
         remaining = max(0, 120 * 60 - int(elapsed.total_seconds()))
         minutes, seconds = divmod(remaining, 60)
         st.info(f"残り時間: {minutes:02d}:{seconds:02d}")
-    responses: Dict[str, int] = {}
-    choice_labels = ["①", "②", "③", "④"]
+    total_questions = len(session.questions)
+    if total_questions == 0:
+        st.info("出題された問題がありません。設定を確認してください。")
+        return
+    session_token_key = f"{key_prefix}_exam_session_token"
+    page_index_key = f"{key_prefix}_page_index"
+    page_size_key = f"{key_prefix}_page_size"
+    responses_key = f"{key_prefix}_responses"
+    page_grade_message_key = f"{key_prefix}_page_grade_message"
+    page_grade_index_key = f"{key_prefix}_page_grade_index"
+    session_token = f"{session.mode}:{session.started_at.isoformat()}"
+    if st.session_state.get(session_token_key) != session_token:
+        st.session_state[session_token_key] = session_token
+        st.session_state[page_index_key] = 0
+        st.session_state[responses_key] = {}
+        st.session_state[page_grade_message_key] = None
+        st.session_state[page_grade_index_key] = None
+        st.session_state[page_size_key] = 10
+    if page_size_key not in st.session_state or not st.session_state[page_size_key]:
+        st.session_state[page_size_key] = 10
+    page_size = int(st.session_state.get(page_size_key, 10) or 10)
+    if page_size <= 0:
+        page_size = 10
+        st.session_state[page_size_key] = page_size
+    total_pages = max(math.ceil(total_questions / page_size), 1)
+    page_index = int(st.session_state.get(page_index_key, 0) or 0)
+    page_index = max(0, min(page_index, total_pages - 1))
+    st.session_state[page_index_key] = page_index
+    start_idx = page_index * page_size
+    end_idx = min(start_idx + page_size, total_questions)
+    page_questions = session.questions[start_idx:end_idx]
+    st.progress((page_index + 1) / total_pages)
+    st.caption(f"ページ {page_index + 1} / {total_pages}")
+    aggregated_responses: Dict[str, int] = {}
     for qid in session.questions:
+        choice = st.session_state.get(f"{key_prefix}_exam_{qid}")
+        if choice is not None:
+            aggregated_responses[qid] = int(choice)
+    st.session_state[responses_key] = aggregated_responses
+    last_grade_message = st.session_state.get(page_grade_message_key)
+    last_grade_index = st.session_state.get(page_grade_index_key)
+    if last_grade_message and last_grade_index == page_index:
+        st.success(last_grade_message)
+    choice_labels = ["①", "②", "③", "④"]
+    for qid in page_questions:
         row_df = df[df["id"] == qid]
         if row_df.empty:
             continue
@@ -4421,14 +4464,99 @@ def render_exam_session_body(
             horizontal=True,
             index=None,
         )
-        if choice is not None:
-            responses[qid] = choice
+    page_responses = {
+        qid: st.session_state.get(f"{key_prefix}_exam_{qid}")
+        for qid in page_questions
+        if st.session_state.get(f"{key_prefix}_exam_{qid}") is not None
+    }
+
+    def go_prev() -> None:
+        st.session_state[page_index_key] = max(0, page_index - 1)
+
+    def go_next() -> None:
+        st.session_state[page_index_key] = min(total_pages - 1, page_index + 1)
+
+    def reset_exam_state() -> None:
+        st.session_state.pop(page_index_key, None)
+        st.session_state.pop(page_grade_message_key, None)
+        st.session_state.pop(page_grade_index_key, None)
+        st.session_state.pop(responses_key, None)
+        st.session_state.pop(session_token_key, None)
+        for qid_inner in session.questions:
+            st.session_state.pop(f"{key_prefix}_exam_{qid_inner}", None)
+
     if st.button(
-        "採点する",
-        key=f"{key_prefix}_grade",
-        help="現在の回答を保存し、正答率や分野別統計を表示します。",
+        "このページを採点",
+        key=f"{key_prefix}_grade_page_{page_index}",
+        help="現在のページに表示されている問題の正答状況を確認します。",
     ):
-        evaluate_exam_attempt(db, df, session, responses, pass_line)
+        correct = 0
+        evaluated = 0
+        unanswered = 0
+        unevaluable = 0
+        for qid in page_questions:
+            if qid not in page_responses:
+                unanswered += 1
+                continue
+            row_df = df[df["id"] == qid]
+            if row_df.empty:
+                continue
+            correct_choice = row_df.iloc[0].get("correct")
+            try:
+                correct_choice_int = int(correct_choice)
+            except (TypeError, ValueError):
+                unevaluable += 1
+                continue
+            evaluated += 1
+            if int(page_responses[qid]) == correct_choice_int:
+                correct += 1
+        total_page_questions = len(page_questions)
+        message_parts = [
+            f"このページの正答数: {correct} / {total_page_questions}"
+        ]
+        if unanswered:
+            message_parts.append(f"未回答 {unanswered} 問")
+        if unevaluable:
+            message_parts.append(f"採点対象外 {unevaluable} 問")
+        st.session_state[page_grade_message_key] = "｜".join(message_parts)
+        st.session_state[page_grade_index_key] = page_index
+    is_last_page = page_index == (total_pages - 1)
+    if is_last_page:
+        if st.button(
+            "総合採点",
+            key=f"{key_prefix}_grade_all",
+            help="全ページの回答を集計して総合結果を表示します。",
+        ):
+            aggregated_responses = st.session_state.get(responses_key, {}).copy()
+            aggregated_responses.update({
+                qid: int(choice)
+                for qid, choice in page_responses.items()
+                if choice is not None
+            })
+            evaluate_exam_attempt(db, df, session, aggregated_responses, pass_line)
+            reset_exam_state()
+            return
+    nav_cols = st.columns([1, 1, 2])
+    with nav_cols[0]:
+        st.button(
+            "前のページ",
+            use_container_width=True,
+            disabled=page_index == 0,
+            key=f"{key_prefix}_prev_page_{page_index}",
+            on_click=with_rerun(go_prev),
+        )
+    with nav_cols[1]:
+        st.button(
+            "次のページ",
+            use_container_width=True,
+            disabled=page_index >= total_pages - 1,
+            key=f"{key_prefix}_next_page_{page_index}",
+            on_click=with_rerun(go_next),
+        )
+    with nav_cols[2]:
+        st.caption(
+            f"回答済み: {len(aggregated_responses)} / {total_questions} 問"
+        )
 
 
 def evaluate_exam_attempt(
