@@ -2830,7 +2830,13 @@ def compute_tricky_vocab_heatmap(
 
 
 def compute_most_improved_topic(attempts: pd.DataFrame, df: pd.DataFrame) -> Optional[Dict[str, object]]:
-    merged = attempts.merge(df[["id", "topic"]], left_on="question_id", right_on="id", how="left")
+    if "topic" not in df.columns:
+        return None
+    merged = attempts.merge(
+        df[["id", "topic"]], left_on="question_id", right_on="id", how="left"
+    )
+    if "topic" not in merged.columns:
+        return None
     merged = merged.dropna(subset=["topic"])
     if merged.empty:
         return None
