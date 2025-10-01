@@ -3985,15 +3985,30 @@ def render_data_io(db: DBManager) -> None:
         accept_multiple_files=True,
     )
     datasets = []
+    file_summaries: List[Dict[str, object]] = []
     if uploaded_files:
         for file in uploaded_files:
+            file_summary = {
+                "file": file.name,
+                "questions": 0,
+                "answers": 0,
+            }
             try:
                 store_uploaded_file(file, timestamp)
                 for name, df in decode_uploaded_file(file):
                     kind = guess_dataset_kind(df)
                     datasets.append({"name": name, "data": df, "kind": kind})
+                    if kind == MAPPING_KIND_QUESTIONS:
+                        file_summary["questions"] += len(df)
+                    elif kind == MAPPING_KIND_ANSWERS:
+                        file_summary["answers"] += len(df)
             except Exception as e:
                 st.error(f"{file.name}: 読み込みに失敗しました ({e})")
+            else:
+                file_summaries.append(file_summary)
+                st.caption(
+                    f"{file_summary['file']}: 設問 {file_summary['questions']} 件 / 正答 {file_summary['answers']} 件"
+                )
     if not datasets:
         st.info("ファイルをアップロードしてください。")
         return
@@ -4186,7 +4201,39 @@ def render_data_io(db: DBManager) -> None:
         )
         rebuild_tfidf_cache()
         progress.progress(100)
-        st.success("インポートが完了しました。TF-IDFを再構築しました。")
+        rejected_total = len(rejects_a) + len(rejects_q)
+        st.success(
+            "インポートが完了しました。"
+            f" 追加 {inserted} 件 / 更新 {updated} 件 / リジェクト {rejected_total} 件。"
+            " TF-IDFを再構築しました。"
+        )
+        if file_summaries:
+            summary_rows = [
+                {
+                    "区分": "アップロード",
+                    "ファイル": summary["file"],
+                    "設問行数": summary["questions"],
+                    "正答行数": summary["answers"],
+                    "追加": "",
+                    "更新": "",
+                    "リジェクト": "",
+                }
+                for summary in file_summaries
+            ]
+        else:
+            summary_rows = []
+        summary_rows.append(
+            {
+                "区分": "DB反映",
+                "ファイル": "結果",
+                "設問行数": "",
+                "正答行数": "",
+                "追加": inserted,
+                "更新": updated,
+                "リジェクト": rejected_total,
+            }
+        )
+        st.table(pd.DataFrame(summary_rows))
 
     st.markdown("### (5) 履歴エクスポート")
     with db.engine.connect() as conn:
