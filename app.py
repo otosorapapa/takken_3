@@ -4297,7 +4297,7 @@ def display_exam_result(result: Dict[str, object]) -> None:
             radar_df = pd.concat([radar_df, radar_df.iloc[[0]]], ignore_index=True)
             chart = (
                 alt.Chart(radar_df)
-                .mark_line(closed=True)
+                .mark_line()
                 .encode(
                     theta=alt.Theta("category", sort=None),
                     radius=alt.Radius("accuracy", scale=alt.Scale(domain=[0, 1])),
