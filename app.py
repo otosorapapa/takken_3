@@ -910,15 +910,56 @@ class DBManager:
             )
         return df
 
-    def get_due_srs(self) -> pd.DataFrame:
+    def get_due_srs(self, upcoming_days: int = 1) -> pd.DataFrame:
         today = dt.date.today()
+        upcoming_days = max(int(upcoming_days or 0), 0)
+        upcoming_limit = today + dt.timedelta(days=upcoming_days)
         with self.engine.connect() as conn:
             df = pd.read_sql(
-                select(srs_table, questions_table.c.question, questions_table.c.category)
+                select(
+                    srs_table,
+                    questions_table.c.question,
+                    questions_table.c.category,
+                )
                 .where(srs_table.c.question_id == questions_table.c.id)
-                .where((srs_table.c.due_date <= today) | (srs_table.c.due_date.is_(None))),
+                .where(
+                    (srs_table.c.due_date <= upcoming_limit)
+                    | (srs_table.c.due_date.is_(None))
+                ),
                 conn,
             )
+        if df.empty:
+            return df
+
+        df["due_date"] = pd.to_datetime(df["due_date"])
+
+        due_in_days: List[Optional[int]] = []
+        due_status: List[str] = []
+        for value in df["due_date"]:
+            if pd.isna(value):
+                due_in_days.append(None)
+                due_status.append("unscheduled")
+                continue
+            if isinstance(value, pd.Timestamp):
+                date_value = value.date()
+            else:
+                date_value = value
+            delta = (date_value - today).days
+            due_in_days.append(delta)
+            if delta < 0:
+                due_status.append("overdue")
+            elif delta == 0:
+                due_status.append("due_today")
+            elif delta == 1:
+                due_status.append("due_tomorrow")
+            elif delta <= upcoming_days:
+                due_status.append("upcoming")
+            else:
+                due_status.append("scheduled")
+
+        df["due_in_days"] = due_in_days
+        df["due_status"] = due_status
+        df["due_date"] = df["due_date"].dt.date
         return df
 
     def upsert_srs(self, question_id: str, payload: Dict[str, Optional[str]]) -> None:
@@ -1689,18 +1730,20 @@ def sm2_update(row: Optional[pd.Series], grade: int, initial_ease: float = 2.5) 
     today = dt.date.today()
     if row is None:
         repetition = 0
-        interval = 1
+        prev_interval = 0
         ease = initial_ease
     else:
         repetition = row.get("repetition", 0) or 0
-        interval = row.get("interval", 1) or 1
+        prev_interval = row.get("interval", 0) or 0
         ease = row.get("ease", 2.5) or 2.5
-    schedule = [1, 3, 7, 21]
     if grade >= 3:
-        if repetition < len(schedule):
-            interval = schedule[repetition]
+        if repetition == 0:
+            interval = 1
+        elif repetition == 1:
+            interval = 6
         else:
-            interval = int(round(max(interval, schedule[-1]) * ease))
+            interval = int(round(max(prev_interval, 1) * ease))
+            interval = max(interval, 1)
         repetition += 1
     else:
         repetition = 0
@@ -3938,13 +3981,64 @@ def render_mock_exam(db: DBManager, df: pd.DataFrame) -> None:
 def render_srs(db: DBManager, parent_nav: str = "学習") -> None:
     render_specialized_header(parent_nav, "弱点復習", "srs")
     st.subheader("弱点復習")
-    due_df = db.get_due_srs()
+    due_df = db.get_due_srs(upcoming_days=1)
+    sidebar_alert = st.sidebar.container()
+    sidebar_alert.subheader("復習アラート")
+
     if due_df.empty:
         st.info("今日復習すべき問題はありません。")
+        sidebar_alert.success("期限が迫る復習はありません。")
         return
+
+    status_labels = {
+        "overdue": "期限切れ",
+        "due_today": "本日期限",
+        "due_tomorrow": "明日期限",
+        "upcoming": "近日期限",
+        "unscheduled": "未設定",
+        "scheduled": "予定あり",
+    }
+
+    status_counts = due_df["due_status"].value_counts().to_dict()
+    overdue_count = int(status_counts.get("overdue", 0))
+    today_count = int(status_counts.get("due_today", 0))
+    tomorrow_count = int(status_counts.get("due_tomorrow", 0))
+
+    if overdue_count:
+        st.error(f"{overdue_count}件の復習が期限切れです。すぐに対応しましょう。")
+        sidebar_alert.error(f"期限切れ: {overdue_count}件")
+    if today_count:
+        st.warning(f"本日期限の復習が{today_count}件あります。")
+        sidebar_alert.warning(f"本日期限: {today_count}件")
+    if tomorrow_count:
+        st.info(f"明日が期限の復習が{tomorrow_count}件あります。")
+        sidebar_alert.info(f"明日期限: {tomorrow_count}件")
+    if not any([overdue_count, today_count, tomorrow_count]):
+        sidebar_alert.success("期限が迫る復習はありません。")
+
+    status_order = {"overdue": 0, "due_today": 1, "due_tomorrow": 2, "upcoming": 3, "unscheduled": 4, "scheduled": 5}
+
+    def _normalize_due_date(value: Optional[dt.date]) -> dt.date:
+        if value is None or pd.isna(value):
+            return dt.date.max
+        if isinstance(value, pd.Timestamp):
+            return value.date()
+        return value
+
+    due_df = due_df.copy()
+    due_df["_status_order"] = due_df["due_status"].map(lambda s: status_order.get(s, 99))
+    due_df["_due_order"] = due_df["due_date"].apply(_normalize_due_date)
+    due_df = due_df.sort_values(["_status_order", "_due_order"]).drop(columns=["_status_order", "_due_order"])
+
     for _, row in due_df.iterrows():
-        st.markdown(f"### {row['question'][:40]}...")
-        st.write(f"分野: {row['category']} / 期限: {row['due_date']}")
+        question_title = str(row.get("question", ""))
+        if len(question_title) > 40:
+            question_title = f"{question_title[:40]}..."
+        st.markdown(f"### {question_title}")
+        due_date = row.get("due_date")
+        due_display = due_date if pd.notna(due_date) else "未設定"
+        status_label = status_labels.get(row.get("due_status"), "")
+        st.write(f"分野: {row['category']} ｜ 期限: {due_display} ({status_label})")
         grade = st.slider(
             f"評価 ({row['question_id']})",
             0,
