@@ -6,3 +6,5 @@ altair
 scikit-learn
 openpyxl
 rapidfuzz
+requests
+spacy

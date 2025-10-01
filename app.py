@@ -2,6 +2,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
 import random
 import re
 import time
@@ -9,7 +10,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
+from typing import (TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set,
+                    Tuple)
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -27,6 +29,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql import insert as sa_insert, text, update
+
+from law_updates import (DEFAULT_LAW_SOURCES, LawRevisionAnalyzer,
+                         LawUpdateResult, LawUpdateSyncService)
 
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "takken.db"
@@ -60,6 +65,11 @@ FONT_SIZE_SCALE = {
     "やや大きい": 1.1,
     "大きい": 1.2,
 }
+
+
+logger = logging.getLogger(__name__)
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
 
 SUBJECT_PRESETS = {
     "バランスよく10問": {
@@ -124,6 +134,12 @@ predicted_questions_table = Table(
     Column("explanation", String),
     Column("difficulty", Integer, default=DIFFICULTY_DEFAULT),
     Column("tags", String),
+    Column("auto_summary", String),
+    Column("auto_cloze", String),
+    Column("review_status", String, default="pending"),
+    Column("reviewed_at", DateTime),
+    Column("generated_from", String),
+    Column("fetched_at", DateTime),
     Column("created_at", DateTime, server_default=func.now()),
 )
 
@@ -147,6 +163,19 @@ law_revision_questions_table = Table(
     Column("explanation", String),
     Column("difficulty", Integer, default=DIFFICULTY_DEFAULT),
     Column("tags", String),
+    Column("created_at", DateTime, server_default=func.now()),
+)
+
+law_revision_sync_logs_table = Table(
+    "law_revision_sync_logs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("source", String, nullable=False),
+    Column("fetched_at", DateTime),
+    Column("status", String, nullable=False),
+    Column("message", String),
+    Column("revisions_detected", Integer, default=0),
+    Column("questions_generated", Integer, default=0),
     Column("created_at", DateTime, server_default=func.now()),
 )
 
@@ -271,6 +300,29 @@ def ensure_schema_migrations(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE attempts ADD COLUMN confidence INTEGER"))
         if "grade" not in attempt_columns:
             conn.execute(text("ALTER TABLE attempts ADD COLUMN grade INTEGER"))
+
+        if "law_revision_questions" in existing_tables:
+            lr_columns = {
+                col["name"] for col in conn_inspector.get_columns("law_revision_questions")
+            }
+            schema_updates = {
+                "auto_summary": "TEXT",
+                "auto_cloze": "TEXT",
+                "review_status": "TEXT",
+                "reviewed_at": "TEXT",
+                "generated_from": "TEXT",
+                "fetched_at": "TEXT",
+            }
+            for column_name, sql_type in schema_updates.items():
+                if column_name not in lr_columns:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE law_revision_questions ADD COLUMN {column_name} {sql_type}"
+                        )
+                    )
+
+        if "law_revision_sync_logs" not in existing_tables:
+            law_revision_sync_logs_table.create(conn)
 
 
 def apply_user_preferences() -> None:
@@ -414,6 +466,12 @@ LAW_REVISION_TEMPLATE_COLUMNS = [
     "explanation",
     "difficulty",
     "tags",
+    "auto_summary",
+    "auto_cloze",
+    "review_status",
+    "reviewed_at",
+    "generated_from",
+    "fetched_at",
 ]
 
 
@@ -558,6 +616,16 @@ class DBManager:
     def load_law_revision_questions(self) -> pd.DataFrame:
         return self.load_dataframe(law_revision_questions_table)
 
+    def load_law_revision_sync_logs(self, limit: int = 20) -> pd.DataFrame:
+        with self.engine.connect() as conn:
+            stmt = select(law_revision_sync_logs_table).order_by(
+                law_revision_sync_logs_table.c.created_at.desc()
+            )
+            if limit:
+                stmt = stmt.limit(limit)
+            df = pd.read_sql(stmt, conn)
+        return df
+
     def upsert_questions(self, df: pd.DataFrame) -> Tuple[int, int]:
         records = df.to_dict(orient="records")
         ids = [rec["id"] for rec in records if "id" in rec]
@@ -685,6 +753,45 @@ class DBManager:
                     if rec_id:
                         existing_ids.add(rec_id)
         return inserted, updated
+
+    def update_law_revision_review_status(
+        self,
+        question_ids: Sequence[str],
+        status: str,
+        reviewer: Optional[str] = None,
+    ) -> None:
+        if not question_ids:
+            return
+        now = dt.datetime.utcnow()
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(law_revision_questions_table)
+                .where(law_revision_questions_table.c.id.in_(list(question_ids)))
+                .values(
+                    review_status=status,
+                    reviewed_at=now,
+                    tags=func.trim(
+                        func.replace(
+                            func.coalesce(law_revision_questions_table.c.tags, ""),
+                            "要レビュー",
+                            "",
+                        )
+                    ),
+                )
+            )
+
+    def record_law_revision_sync(self, result: LawUpdateResult) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                sa_insert(law_revision_sync_logs_table).values(
+                    source=result.source,
+                    fetched_at=result.fetched_at,
+                    status=result.status,
+                    message=result.message,
+                    revisions_detected=result.revisions_detected,
+                    questions_generated=result.questions_generated,
+                )
+            )
 
     def fetch_question(self, question_id: str) -> Optional[pd.Series]:
         with self.engine.connect() as conn:
@@ -844,6 +951,20 @@ def load_questions_df() -> pd.DataFrame:
 @st.cache_resource
 def get_vectorizer() -> TfidfVectorizer:
     return TfidfVectorizer(stop_words=None, max_features=5000)
+
+
+@st.cache_resource
+def get_law_revision_analyzer() -> LawRevisionAnalyzer:
+    return LawRevisionAnalyzer()
+
+
+def get_law_update_service(db: DBManager) -> LawUpdateSyncService:
+    analyzer = get_law_revision_analyzer()
+    return LawUpdateSyncService(
+        sources=DEFAULT_LAW_SOURCES,
+        analyzer=analyzer,
+        id_builder=generate_law_revision_question_id,
+    )
 
 
 def rebuild_tfidf_cache() -> None:
@@ -1023,11 +1144,31 @@ def normalize_law_revision_questions(
     for col in ["question", "choice1", "choice2", "choice3", "choice4"]:
         df[col] = df[col].fillna("").astype(str)
     df["law_name"] = df.get("law_name", "").fillna("").astype(str)
-    optional_str_cols = ["label", "category", "topic", "source", "effective_date", "explanation", "tags"]
+    optional_str_cols = [
+        "label",
+        "category",
+        "topic",
+        "source",
+        "effective_date",
+        "explanation",
+        "tags",
+        "auto_summary",
+        "auto_cloze",
+        "review_status",
+        "generated_from",
+        "fetched_at",
+    ]
     for col in optional_str_cols:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)
+    if "review_status" in df.columns:
+        df["review_status"] = df["review_status"].replace("", "pending")
+    if "reviewed_at" not in df.columns:
+        df["reviewed_at"] = ""
+    df["reviewed_at"] = pd.to_datetime(df["reviewed_at"], errors="coerce")
+    if "fetched_at" in df.columns:
+        df["fetched_at"] = pd.to_datetime(df["fetched_at"], errors="coerce")
     df["revision_year"] = (
         pd.to_numeric(df.get("revision_year"), errors="coerce")
         .astype("Int64")
@@ -1355,6 +1496,12 @@ def build_sample_law_revision_csv() -> str:
             "explanation": "改正条文のポイントを記載します。",
             "difficulty": DIFFICULTY_DEFAULT,
             "tags": "法改正;直前対策",
+            "auto_summary": "宅建業法の改正により重要事項説明書へ改正内容の追記が求められる。",
+            "auto_cloze": "宅建業法の改正により重要事項説明書に＿＿＿を追記する必要がある。",
+            "review_status": "approved",
+            "reviewed_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "generated_from": "サンプルデータ",
+            "fetched_at": dt.datetime.now().isoformat(timespec="seconds"),
         }
     ]
     buffer = io.StringIO()
@@ -2498,6 +2645,7 @@ def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
 def render_law_revision_lane(db: DBManager) -> None:
     st.subheader("法改正対策")
     law_df = db.load_law_revision_questions()
+    sync_logs = db.load_law_revision_sync_logs(limit=5)
     if law_df.empty:
         st.info(
             "法改正予想問題データが登録されていません。『データ入出力』タブから law_revision.csv を取り込みましょう。"
@@ -2507,7 +2655,8 @@ def render_law_revision_lane(db: DBManager) -> None:
         "最新の法改正ポイントを重点的に演習できます。正答が未設定の場合は自己採点してください。"
     )
     total_questions = len(law_df)
-    summary_cols = st.columns(3)
+    pending_count = int((law_df.get("review_status") == "pending").sum())
+    summary_cols = st.columns(4)
     with summary_cols[0]:
         st.metric("登録数", total_questions)
     with summary_cols[1]:
@@ -2519,6 +2668,28 @@ def render_law_revision_lane(db: DBManager) -> None:
             st.metric("最新改正年度", "未設定")
         else:
             st.metric("最新改正年度", f"{int(recent_years.max())}年")
+    with summary_cols[3]:
+        st.metric("未レビュー", pending_count)
+    if not sync_logs.empty:
+        latest = sync_logs.iloc[0]
+        status = latest.get("status", "-")
+        timestamp = latest.get("fetched_at")
+        status_text = f"{status}"
+        if pd.notna(timestamp):
+            status_text += f" / {pd.to_datetime(timestamp).strftime('%Y-%m-%d %H:%M')}"
+        st.caption(f"最終更新: {status_text}")
+    else:
+        st.caption("自動更新ログがありません。『データ入出力』で取得を開始できます。")
+    with st.expander("自動更新状況", expanded=False):
+        if sync_logs.empty:
+            st.info("まだ自動取得履歴がありません。")
+        else:
+            display = sync_logs.copy()
+            display["fetched_at"] = pd.to_datetime(display["fetched_at"]).dt.strftime("%Y-%m-%d %H:%M")
+            st.dataframe(
+                display[["fetched_at", "source", "status", "revisions_detected", "questions_generated", "message"]],
+                use_container_width=True,
+            )
     with st.expander("出題条件", expanded=True):
         law_names = sorted(
             {
@@ -2573,6 +2744,18 @@ def render_law_revision_lane(db: DBManager) -> None:
                 default_range,
                 key="law_revision_year_range",
             )
+        status_options = ["すべて", "pending", "approved", "rejected"]
+        review_status = st.selectbox(
+            "レビュー状態",
+            status_options,
+            format_func=lambda value: {
+                "すべて": "すべて",
+                "pending": "要レビュー",
+                "approved": "承認済み",
+                "rejected": "差戻し",
+            }.get(value, value),
+            key="law_revision_review_status",
+        )
         keyword = st.text_input(
             "キーワードフィルタ",
             value="",
@@ -2592,6 +2775,8 @@ def render_law_revision_lane(db: DBManager) -> None:
         filtered = filtered[mask]
     elif not include_unknown_year:
         filtered = filtered[filtered["revision_year"].notna()]
+    if review_status != "すべて" and "review_status" in filtered.columns:
+        filtered = filtered[filtered["review_status"].fillna("pending") == review_status]
     if keyword:
         keyword = keyword.strip()
         if keyword:
@@ -2605,6 +2790,28 @@ def render_law_revision_lane(db: DBManager) -> None:
     if filtered.empty:
         st.warning("条件に一致する法改正問題がありません。フィルタを緩和してください。")
         return
+    with st.expander("レビュー・承認", expanded=False):
+        pending_df = filtered[filtered.get("review_status") == "pending"]
+        if pending_df.empty:
+            st.info("未レビューの問題はありません。")
+        else:
+            review_selection = st.multiselect(
+                "承認対象の問題",
+                pending_df["id"],
+                format_func=lambda qid: format_question_label(law_df, qid),
+                key="law_revision_review_selection",
+            )
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("選択した問題を承認", key="law_revision_approve"):
+                    db.update_law_revision_review_status(review_selection, "approved")
+                    st.success("承認しました。")
+                    st.experimental_rerun()
+            with col_b:
+                if st.button("選択した問題を差戻し", key="law_revision_reject"):
+                    db.update_law_revision_review_status(review_selection, "rejected")
+                    st.warning("差戻しました。")
+                    st.experimental_rerun()
     with st.expander("法改正問題一覧", expanded=False):
         preview_cols = [
             "law_name",
@@ -3745,6 +3952,31 @@ def render_data_io(db: DBManager) -> None:
             help="最新の法改正論点を整理した問題サンプルです。改正年度や施行日を追記してご利用ください。",
         )
     st.caption("サンプルCSVはExcelに貼り付けて使えるよう列幅を調整済みです。コピー&ペーストで手早く登録できます。")
+    st.markdown("### 法改正自動更新")
+    st.caption("不動産適正取引推進機構や専門予備校の公開フィードを HTTP 経由で取得し、自動で法改正問題を生成・登録します。")
+    if st.button("最新の法改正フィードを取得", key="law_revision_sync_button"):
+        service = get_law_update_service(db)
+        with st.spinner("最新情報を取得しています..."):
+            results = service.run(db)
+        success_results = [r for r in results if r.status in {"success", "empty"}]
+        if any(r.status == "success" for r in success_results):
+            st.success("自動取得と問題生成が完了しました。『法改正対策』で確認してください。")
+        elif success_results:
+            st.info("フィードを取得しましたが新しい問題は生成されませんでした。")
+        else:
+            errors = [r for r in results if r.status == "error"]
+            if errors:
+                st.error("外部フィードの取得に失敗しました。ログを確認してください。")
+    sync_history = db.load_law_revision_sync_logs(limit=10)
+    if sync_history.empty:
+        st.info("自動取得履歴はまだありません。上のボタンから同期を開始してください。")
+    else:
+        history_df = sync_history.copy()
+        history_df["fetched_at"] = pd.to_datetime(history_df["fetched_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        st.dataframe(
+            history_df[["fetched_at", "source", "status", "revisions_detected", "questions_generated", "message"]],
+            use_container_width=True,
+        )
     st.markdown("### クイックインポート (questions.csv / answers.csv)")
     quick_cols = st.columns(2)
     with quick_cols[0]:
