@@ -3561,145 +3561,161 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
         st.info("CSVを直接編集した場合は、日付や秒数の列が数値・日時形式になっているか確認してください。")
         return
     question_meta_cols = ["id", "question", "category", "topic", "tags", "difficulty"]
-    merged = attempts.merge(
-        df[question_meta_cols],
-        left_on="question_id",
-        right_on="id",
-        how="left",
-        suffixes=("", "_question"),
-    )
-    for col in ["category", "topic"]:
-        alt_col = f"{col}_question"
-        if alt_col in merged.columns:
-            if col in merged.columns:
-                merged[col] = merged[col].fillna(merged[alt_col])
-            else:
-                merged[col] = merged[alt_col]
-            merged = merged.drop(columns=[alt_col])
-    if merged.empty:
-        st.warning("集計対象の設問が特定できませんでした。設問データが削除されていないか確認してください。")
-        st.info("『データ入出力』でquestions.csvを再度取り込み、設問IDと学習履歴の対応を復元できます。")
+    available_meta_cols = [col for col in question_meta_cols if col in df.columns]
+    missing_cols = sorted(set(question_meta_cols) - set(available_meta_cols))
+    if missing_cols:
+        st.warning("データが不足しています。")
+        if hasattr(st, "logger"):
+            st.logger.error("Missing question metadata columns: %s", ", ".join(missing_cols))
         return
-    accuracy_series = merged["is_correct"].dropna()
-    seconds_series = merged["seconds"].dropna()
-    confidence_series = merged["confidence"].dropna()
-    accuracy = accuracy_series.mean() if not accuracy_series.empty else np.nan
-    avg_seconds = seconds_series.mean() if not seconds_series.empty else np.nan
-    avg_confidence = confidence_series.mean() if not confidence_series.empty else np.nan
-    st.subheader("サマリー")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("挑戦回数", f"{len(merged)} 回")
-    with col2:
-        accuracy_text = f"{accuracy * 100:.1f}%" if not np.isnan(accuracy) else "--"
-        st.metric("平均正答率", accuracy_text)
-    with col3:
-        st.metric("平均解答時間", f"{avg_seconds:.1f} 秒" if not np.isnan(avg_seconds) else "--")
-    if not np.isnan(avg_confidence):
-        st.caption(f"平均確信度: {avg_confidence:.1f}%")
-    else:
-        st.caption("平均確信度: -- (十分なデータがありません)")
-
-    import altair as alt
-
-    st.subheader("分野別分析")
-    category_stats = (
-        merged.groupby("category")
-        .agg(
-            accuracy=("is_correct", "mean"),
-            avg_seconds=("seconds", "mean"),
-            attempts_count=("is_correct", "count"),
+    meta_df = df[available_meta_cols].copy()
+    try:
+        merged = attempts.merge(
+            meta_df,
+            left_on="question_id",
+            right_on="id",
+            how="left",
+            suffixes=("", "_question"),
         )
-        .reset_index()
-    )
-    if category_stats.empty:
-        st.info("分野情報の十分なデータがありません。questions.csv の category 列を確認してください。")
-    else:
-        try:
-            accuracy_chart = (
-                alt.Chart(category_stats)
-                .mark_bar()
-                .encode(
-                    x=alt.X("category", title="分野"),
-                    y=alt.Y("accuracy", title="正答率", axis=alt.Axis(format="%")),
-                    tooltip=["category", alt.Tooltip("accuracy", format=".2%"), "attempts_count"],
-                )
-                .properties(height=320)
-            )
-            st.altair_chart(accuracy_chart, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"分野別正答率グラフを表示できませんでした ({exc})")
-            st.caption("十分なデータが集まると自動で表示されます。")
-        try:
-            time_chart = (
-                alt.Chart(category_stats)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("category", title="分野"),
-                    y=alt.Y("avg_seconds", title="平均解答時間 (秒)", scale=alt.Scale(zero=False)),
-                    tooltip=["category", alt.Tooltip("avg_seconds", format=".1f"), "attempts_count"],
-                )
-            )
-            st.altair_chart(time_chart, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"分野別時間グラフを表示できませんでした ({exc})")
-            st.caption("十分なデータが集まると自動で表示されます。")
+        for col in ["category", "topic"]:
+            alt_col = f"{col}_question"
+            if alt_col in merged.columns:
+                if col in merged.columns:
+                    merged[col] = merged[col].fillna(merged[alt_col])
+                else:
+                    merged[col] = merged[alt_col]
+                merged = merged.drop(columns=[alt_col])
+        if merged.empty:
+            st.warning("集計対象の設問が特定できませんでした。設問データが削除されていないか確認してください。")
+            st.info("『データ入出力』でquestions.csvを再度取り込み、設問IDと学習履歴の対応を復元できます。")
+            return
+        accuracy_series = merged["is_correct"].dropna()
+        seconds_series = merged["seconds"].dropna()
+        confidence_series = merged["confidence"].dropna()
+        accuracy = accuracy_series.mean() if not accuracy_series.empty else np.nan
+        avg_seconds = seconds_series.mean() if not seconds_series.empty else np.nan
+        avg_confidence = confidence_series.mean() if not confidence_series.empty else np.nan
+        st.subheader("サマリー")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("挑戦回数", f"{len(merged)} 回")
+        with col2:
+            accuracy_text = f"{accuracy * 100:.1f}%" if not np.isnan(accuracy) else "--"
+            st.metric("平均正答率", accuracy_text)
+        with col3:
+            st.metric("平均解答時間", f"{avg_seconds:.1f} 秒" if not np.isnan(avg_seconds) else "--")
+        if not np.isnan(avg_confidence):
+            st.caption(f"平均確信度: {avg_confidence:.1f}%")
+        else:
+            st.caption("平均確信度: -- (十分なデータがありません)")
 
-    st.subheader("確信度と正答の相関")
-    valid_conf = merged.dropna(subset=["confidence"])
-    if valid_conf.empty:
-        st.info("確信度データがまだ十分ではありません。学習時にスライダーで自己評価してみましょう。")
-    else:
-        corr = valid_conf["confidence"].corr(valid_conf["is_correct"])
-        st.metric("相関係数", f"{corr:.2f}")
-        try:
-            scatter = (
-                alt.Chart(valid_conf)
-                .mark_circle(opacity=0.6)
-                .encode(
-                    x=alt.X("confidence", title="確信度 (%)"),
-                    y=alt.Y("is_correct", title="正答 (1=正解)", scale=alt.Scale(domain=[-0.1, 1.1])),
-                    color=alt.Color("category", legend=None),
-                    tooltip=["category", "topic", "confidence", "is_correct", "seconds"],
-                )
-            )
-            st.altair_chart(scatter, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"相関散布図を表示できませんでした ({exc})")
-            st.caption("十分なデータが集まると自動で表示されます。")
+        import altair as alt
 
-    st.subheader("ひっかけ語彙ヒートマップ")
-    heatmap_df = compute_tricky_vocab_heatmap(merged, df)
-    if heatmap_df.empty:
-        st.info("誤答語彙の十分なデータがありません。")
-    else:
-        try:
-            word_order = (
-                heatmap_df.groupby("word")["count"].sum().sort_values(ascending=False).index.tolist()
+        st.subheader("分野別分析")
+        category_stats = (
+            merged.groupby("category")
+            .agg(
+                accuracy=("is_correct", "mean"),
+                avg_seconds=("seconds", "mean"),
+                attempts_count=("is_correct", "count"),
             )
-            heatmap = (
-                alt.Chart(heatmap_df)
-                .mark_rect()
-                .encode(
-                    x=alt.X("category", title="分野"),
-                    y=alt.Y("word", title="語彙", sort=word_order),
-                    color=alt.Color("count", title="誤答回数", scale=alt.Scale(scheme="reds")),
-                    tooltip=["word", "category", "count"],
-                )
-            )
-            st.altair_chart(heatmap, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"語彙ヒートマップを表示できませんでした ({exc})")
-            st.caption("十分なデータが集まると自動で表示されます。")
-
-    st.subheader("最も改善した論点")
-    improvement = compute_most_improved_topic(merged, df)
-    if improvement:
-        st.success(
-            f"{improvement['topic']}：正答率が {(improvement['early'] * 100):.1f}% → {(improvement['late'] * 100):.1f}% (＋{improvement['delta'] * 100:.1f}ポイント)"
+            .reset_index()
         )
-    else:
-        st.info("改善の傾向を示す論点はまだ検出されていません。継続して学習しましょう。")
+        if category_stats.empty:
+            st.info("分野情報の十分なデータがありません。questions.csv の category 列を確認してください。")
+        else:
+            try:
+                accuracy_chart = (
+                    alt.Chart(category_stats)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("category", title="分野"),
+                        y=alt.Y("accuracy", title="正答率", axis=alt.Axis(format="%")),
+                        tooltip=["category", alt.Tooltip("accuracy", format=".2%"), "attempts_count"],
+                    )
+                    .properties(height=320)
+                )
+                st.altair_chart(accuracy_chart, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"分野別正答率グラフを表示できませんでした ({exc})")
+                st.caption("十分なデータが集まると自動で表示されます。")
+            try:
+                time_chart = (
+                    alt.Chart(category_stats)
+                    .mark_line(point=True)
+                    .encode(
+                        x=alt.X("category", title="分野"),
+                        y=alt.Y("avg_seconds", title="平均解答時間 (秒)", scale=alt.Scale(zero=False)),
+                        tooltip=["category", alt.Tooltip("avg_seconds", format=".1f"), "attempts_count"],
+                    )
+                )
+                st.altair_chart(time_chart, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"分野別時間グラフを表示できませんでした ({exc})")
+                st.caption("十分なデータが集まると自動で表示されます。")
+
+        st.subheader("確信度と正答の相関")
+        valid_conf = merged.dropna(subset=["confidence"])
+        if valid_conf.empty:
+            st.info("確信度データがまだ十分ではありません。学習時にスライダーで自己評価してみましょう。")
+        else:
+            corr = valid_conf["confidence"].corr(valid_conf["is_correct"])
+            st.metric("相関係数", f"{corr:.2f}")
+            try:
+                scatter = (
+                    alt.Chart(valid_conf)
+                    .mark_circle(opacity=0.6)
+                    .encode(
+                        x=alt.X("confidence", title="確信度 (%)"),
+                        y=alt.Y("is_correct", title="正答 (1=正解)", scale=alt.Scale(domain=[-0.1, 1.1])),
+                        color=alt.Color("category", legend=None),
+                        tooltip=["category", "topic", "confidence", "is_correct", "seconds"],
+                    )
+                )
+                st.altair_chart(scatter, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"相関散布図を表示できませんでした ({exc})")
+                st.caption("十分なデータが集まると自動で表示されます。")
+
+        st.subheader("ひっかけ語彙ヒートマップ")
+        heatmap_df = compute_tricky_vocab_heatmap(merged, meta_df)
+        if heatmap_df.empty:
+            st.info("誤答語彙の十分なデータがありません。")
+        else:
+            try:
+                word_order = (
+                    heatmap_df.groupby("word")["count"].sum().sort_values(ascending=False).index.tolist()
+                )
+                heatmap = (
+                    alt.Chart(heatmap_df)
+                    .mark_rect()
+                    .encode(
+                        x=alt.X("category", title="分野"),
+                        y=alt.Y("word", title="語彙", sort=word_order),
+                        color=alt.Color("count", title="誤答回数", scale=alt.Scale(scheme="reds")),
+                        tooltip=["word", "category", "count"],
+                    )
+                )
+                st.altair_chart(heatmap, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"語彙ヒートマップを表示できませんでした ({exc})")
+                st.caption("十分なデータが集まると自動で表示されます。")
+
+        st.subheader("最も改善した論点")
+        improvement = compute_most_improved_topic(merged, meta_df)
+        if improvement:
+            st.success(
+                f"{improvement['topic']}：正答率が {(improvement['early'] * 100):.1f}% → {(improvement['late'] * 100):.1f}% (＋{improvement['delta'] * 100:.1f}ポイント)"
+            )
+        else:
+            st.info("改善の傾向を示す論点はまだ検出されていません。継続して学習しましょう。")
+    except KeyError as exc:
+        st.warning("データが不足しています。")
+        if hasattr(st, "logger"):
+            st.logger.error("集計処理で列参照エラーが発生しました: %s", exc)
+        return
+
+
 def render_data_io(db: DBManager) -> None:
     st.title("データ入出力")
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
