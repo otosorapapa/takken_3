@@ -275,58 +275,143 @@ def ensure_schema_migrations(engine: Engine) -> None:
 
 def apply_user_preferences() -> None:
     settings = st.session_state.get("settings", {})
-    theme = settings.get("theme", "セピア")
+    theme = settings.get("theme", "ライト")
     font_label = settings.get("font_size", "標準")
     scale = FONT_SIZE_SCALE.get(font_label, 1.0)
     base_css = f"""
 :root {{
     --takken-font-scale: {scale};
+    --takken-font-family: 'Noto Sans JP', 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    --takken-accent: #2563eb;
+    --takken-surface: #f1f5f9;
+    --takken-surface-strong: #ffffff;
+    --takken-text: #1f2937;
+    --takken-muted: #64748b;
+    --takken-success-bg: #ecfdf5;
+    --takken-success-text: #047857;
+    --takken-error-bg: #fef2f2;
+    --takken-error-text: #b91c1c;
+    --takken-warning-bg: #fffbeb;
+    --takken-warning-text: #92400e;
 }}
 [data-testid="stAppViewContainer"] * {{
     font-size: calc(1rem * var(--takken-font-scale));
+    font-family: var(--takken-font-family);
+    letter-spacing: 0.01em;
+}}
+.stButton>button {{
+    font-family: var(--takken-font-family);
+    border-radius: 999px;
+    padding: 0.55rem 1.4rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+    background: var(--takken-accent);
+    color: #ffffff;
+    box-shadow: 0 10px 25px rgba(37, 99, 235, 0.18);
+    transition: transform 0.12s ease, box-shadow 0.2s ease;
+}}
+.stButton>button:hover {{
+    transform: translateY(-1px);
+    box-shadow: 0 14px 30px rgba(37, 99, 235, 0.22);
+}}
+.stButton>button:focus {{
+    outline: 3px solid rgba(37, 99, 235, 0.4);
+    outline-offset: 2px;
+}}
+.stButton>button[type="secondary"] {{
+    background: var(--takken-surface);
+    color: var(--takken-text);
+    border-color: rgba(37, 99, 235, 0.25);
+    box-shadow: none;
+}}
+.stButton>button[type="secondary"]:hover {{
+    background: #e2e8f0;
 }}
 .takken-search-suggestions .stButton>button {{
     width: 100%;
     margin-bottom: 0.35rem;
 }}
 .takken-search-suggestions .stButton>button:hover {{
-    border-color: #6366f1;
+    border-color: #1d4ed8;
+}}
+[data-testid="metric-container"] {{
+    background: var(--takken-surface-strong);
+    border-radius: 1rem;
+    padding: 1rem;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+}}
+[data-testid="stMetricValue"] {{
+    color: var(--takken-text);
+}}
+[data-testid="stMetricLabel"] {{
+    color: var(--takken-muted);
+}}
+[data-testid="stAlertSuccess"] {{
+    background: var(--takken-success-bg);
+    color: var(--takken-success-text);
+    border: 1px solid rgba(4, 120, 87, 0.35);
+    border-radius: 0.9rem;
+}}
+[data-testid="stAlertDanger"] {{
+    background: var(--takken-error-bg);
+    color: var(--takken-error-text);
+    border: 1px solid rgba(185, 28, 28, 0.35);
+    border-radius: 0.9rem;
+}}
+[data-testid="stAlertWarning"] {{
+    background: var(--takken-warning-bg);
+    color: var(--takken-warning-text);
+    border: 1px solid rgba(146, 64, 14, 0.35);
+    border-radius: 0.9rem;
+}}
+.stAlert p {{
+    margin-bottom: 0;
 }}
 """
     if theme == "ダーク":
         theme_css = """
+:root {
+    --takken-surface: #1f2937;
+    --takken-surface-strong: #111827;
+    --takken-text: #f9fafb;
+    --takken-muted: #cbd5f5;
+    --takken-success-bg: rgba(16, 185, 129, 0.2);
+    --takken-success-text: #34d399;
+    --takken-error-bg: rgba(248, 113, 113, 0.18);
+    --takken-error-text: #fca5a5;
+    --takken-warning-bg: rgba(253, 230, 138, 0.22);
+    --takken-warning-text: #fcd34d;
+}
 [data-testid="stAppViewContainer"] {
-    background-color: #0e1117;
-    color: #e7eefc;
-}
-[data-testid="stSidebar"] {
-    background-color: #111827;
-}
-.stMetric, .stAlert {
-    background-color: rgba(255, 255, 255, 0.04);
+    background-color: #0f172a;
+    color: var(--takken-text);
 }
 """
     elif theme == "セピア":
         theme_css = """
+:root {
+    --takken-surface: #f8f1e5;
+    --takken-surface-strong: #fef9f1;
+    --takken-text: #433422;
+    --takken-muted: #8b6b4a;
+}
 [data-testid="stAppViewContainer"] {
-    background-color: #f3e9d2;
-    color: #4a3f35;
-}
-[data-testid="stSidebar"] {
-    background-color: #f9f1e0;
-}
-.stMetric, .stAlert {
-    background-color: rgba(74, 63, 53, 0.06);
+    background-color: #fcf5e6;
+    color: var(--takken-text);
 }
 """
     else:
         theme_css = """
-[data-testid="stAppViewContainer"] {
-    background-color: #f8fafc;
-    color: #1f2933;
+:root {
+    --takken-surface: #f1f5f9;
+    --takken-surface-strong: #ffffff;
+    --takken-text: #1f2937;
+    --takken-muted: #64748b;
 }
-[data-testid="stSidebar"] {
+[data-testid="stAppViewContainer"] {
     background-color: #ffffff;
+    color: var(--takken-text);
 }
 """
     inject_style(base_css + theme_css, "takken-theme-styles")
@@ -351,6 +436,118 @@ def with_rerun(callback: Callable[..., None], *args, **kwargs) -> Callable[[], N
 
 def handle_nav_change() -> None:
     st.session_state["nav"] = st.session_state.get("_nav_widget", "ホーム")
+
+
+def toggle_nav_menu() -> None:
+    current = st.session_state.get("nav_menu_open", True)
+    st.session_state["nav_menu_open"] = not current
+
+
+def render_navigation_menu(menu_options: List[str]) -> None:
+    inject_ui_styles()
+    if not menu_options:
+        return
+    if "nav_menu_open" not in st.session_state:
+        st.session_state["nav_menu_open"] = True
+    current_nav = st.session_state.get("nav", menu_options[0])
+    if current_nav not in menu_options:
+        current_nav = menu_options[0]
+        st.session_state["nav"] = current_nav
+    if st.session_state.get("_nav_widget") != current_nav:
+        st.session_state["_nav_widget"] = current_nav
+    nav_open = st.session_state.get("nav_menu_open", True)
+    with st.container():
+        st.markdown('<div class="takken-top-nav">', unsafe_allow_html=True)
+        header_cols = st.columns([0.25, 0.5, 0.25])
+        with header_cols[0]:
+            st.markdown('<div class="takken-nav-toggle">', unsafe_allow_html=True)
+            st.button(
+                "☰",
+                key="takken_nav_toggle",
+                type="secondary",
+                use_container_width=True,
+                help="メニューを開閉",
+                on_click=with_rerun(toggle_nav_menu),
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with header_cols[1]:
+            st.markdown(
+                f'<div class="takken-top-nav-current">{st.session_state.get("nav", current_nav)}</div>',
+                unsafe_allow_html=True,
+            )
+        with header_cols[2]:
+            st.write("")
+        if nav_open:
+            st.markdown('<div class="takken-nav-panel">', unsafe_allow_html=True)
+            st.radio(
+                "メニュー",
+                menu_options,
+                index=menu_options.index(st.session_state.get("nav", current_nav)),
+                key="_nav_widget",
+                on_change=with_rerun(handle_nav_change),
+                label_visibility="collapsed",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(
+                "<div class='takken-nav-collapsed-hint'>メニューは左上の☰から開閉できます。</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def shift_carousel(index_key: str, total: int, delta: int) -> None:
+    if total <= 0:
+        return
+    current = st.session_state.get(index_key, 0)
+    st.session_state[index_key] = (current + delta) % total
+
+
+def render_chart_carousel(items: List[Dict[str, Callable[[], None]]], key: str) -> None:
+    if not items:
+        return
+    index_key = f"{key}_index"
+    total = len(items)
+    current_index = st.session_state.get(index_key, 0)
+    if current_index >= total or current_index < 0:
+        current_index = 0
+    st.session_state[index_key] = current_index
+    item = items[current_index]
+    with st.container():
+        st.markdown('<div class="takken-carousel">', unsafe_allow_html=True)
+        title = item.get("title") if isinstance(item, dict) else None
+        description = item.get("description") if isinstance(item, dict) else None
+        render_fn = item.get("render") if isinstance(item, dict) else None
+        if title:
+            st.markdown(f"#### {title}")
+        if callable(render_fn):
+            render_fn()
+        if description:
+            st.caption(description)
+        if total > 1:
+            prev_col, indicator_col, next_col = st.columns([1, 1, 1])
+            with prev_col:
+                st.button(
+                    "◀ 前へ",
+                    key=f"{key}_prev",
+                    type="secondary",
+                    use_container_width=True,
+                    on_click=with_rerun(shift_carousel, index_key, total, -1),
+                )
+            with indicator_col:
+                st.markdown(
+                    f"<div class='takken-carousel-indicator'>{current_index + 1} / {total}</div>",
+                    unsafe_allow_html=True,
+                )
+            with next_col:
+                st.button(
+                    "次へ ▶",
+                    key=f"{key}_next",
+                    type="secondary",
+                    use_container_width=True,
+                    on_click=with_rerun(shift_carousel, index_key, total, 1),
+                )
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 QUESTION_TEMPLATE_COLUMNS = [
@@ -1546,6 +1743,100 @@ def inject_ui_styles() -> None:
         return
     inject_style(
         """
+.takken-top-nav {
+    position: sticky;
+    top: 0;
+    z-index: 999;
+    background: var(--takken-surface-strong);
+    border-radius: 1rem;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1.5rem;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+.takken-top-nav-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+.takken-top-nav-current {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--takken-text);
+}
+.takken-nav-toggle .stButton>button {
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    border-radius: 999px;
+}
+.takken-nav-toggle .stButton>button[type="secondary"] {
+    background: var(--takken-surface);
+    border-color: rgba(148, 163, 184, 0.4);
+}
+.takken-nav-panel {
+    margin-top: 0.75rem;
+    padding: 0.5rem;
+    border-radius: 0.9rem;
+    background: var(--takken-surface);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+}
+.takken-nav-panel [data-testid="stRadio"] > div[role="radiogroup"] {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.takken-nav-panel [data-testid="stRadio"] label {
+    border-radius: 0.75rem;
+    border: 1px solid transparent;
+    padding: 0.6rem 0.8rem;
+    color: var(--takken-text);
+    background: var(--takken-surface-strong);
+    font-weight: 600;
+    cursor: pointer;
+}
+.takken-nav-panel [data-testid="stRadio"] label:hover {
+    border-color: rgba(37, 99, 235, 0.35);
+    box-shadow: 0 10px 18px rgba(15, 23, 42, 0.08);
+}
+.takken-nav-panel [data-testid="stRadio"] label[data-baseweb="radio"] span[data-testid="stMarkdownContainer"] {
+    color: inherit;
+}
+.takken-nav-panel [data-testid="stRadio"] label[data-checked="true"],
+.takken-nav-panel [data-testid="stRadio"] label[data-baseweb="radio"] input:checked + div {
+    border-color: rgba(37, 99, 235, 0.6);
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--takken-text);
+}
+.takken-nav-collapsed-hint {
+    color: var(--takken-muted);
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+}
+.takken-carousel {
+    background: var(--takken-surface-strong);
+    border-radius: 1rem;
+    padding: 1rem;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+}
+.takken-carousel-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+.takken-carousel-indicator {
+    font-size: 0.85rem;
+    color: var(--takken-muted);
+    text-align: center;
+    margin-top: 0.25rem;
+}
+.takken-carousel button {
+    min-width: 72px;
+}
 .takken-choice-button button {
     width: 100%;
     min-height: 56px;
@@ -2008,7 +2299,7 @@ def init_session_state() -> None:
         "import_state": {},
         "settings": {
             "shuffle_choices": True,
-            "theme": "セピア",
+            "theme": "ライト",
             "font_size": "標準",
             "timer": True,
             "sm2_initial_ease": 2.5,
@@ -2017,6 +2308,7 @@ def init_session_state() -> None:
             "review_elapsed_days": 7,
         },
         "_nav_widget": "ホーム",
+        "nav_menu_open": True,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -2032,10 +2324,6 @@ def main() -> None:
     db.initialize_from_csv()
     df = load_questions_df()
 
-    sidebar = st.sidebar
-    sidebar.title("宅建10年ドリル")
-    if st.session_state.get("_nav_widget") != st.session_state.get("nav"):
-        st.session_state["_nav_widget"] = st.session_state.get("nav", "ホーム")
     menu_options = [
         "ホーム",
         "学習モード",
@@ -2047,18 +2335,9 @@ def main() -> None:
         "データ入出力",
         "設定",
     ]
-    sidebar.radio(
-        "メニュー",
-        menu_options,
-        index=menu_options.index(
-            st.session_state.get("nav", "ホーム")
-        ),
-        key="_nav_widget",
-        on_change=with_rerun(handle_nav_change),
-    )
+    render_navigation_menu(menu_options)
     nav = st.session_state.get("nav", "ホーム")
-    sidebar.divider()
-    with sidebar.expander("モード別の使い方ガイド", expanded=False):
+    with st.expander("モード別の使い方ガイド", expanded=False):
         st.markdown(
             "\n".join(
                 [
@@ -3602,7 +3881,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
 
     import altair as alt
 
-    st.subheader("分野別分析")
+    chart_items: List[Dict[str, Callable[[], None]]] = []
     category_stats = (
         merged.groupby("category")
         .agg(
@@ -3626,7 +3905,13 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 )
                 .properties(height=320)
             )
-            st.altair_chart(accuracy_chart, use_container_width=True)
+            chart_items.append(
+                {
+                    "title": "分野別正答率",
+                    "render": lambda chart=accuracy_chart: st.altair_chart(chart, use_container_width=True),
+                    "description": "分野ごとの正答率と挑戦数の分布を示します。",
+                }
+            )
         except Exception as exc:
             st.warning(f"分野別正答率グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -3640,18 +3925,22 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     tooltip=["category", alt.Tooltip("avg_seconds", format=".1f"), "attempts_count"],
                 )
             )
-            st.altair_chart(time_chart, use_container_width=True)
+            chart_items.append(
+                {
+                    "title": "分野別平均解答時間",
+                    "render": lambda chart=time_chart: st.altair_chart(chart, use_container_width=True),
+                    "description": "出題分野ごとの平均解答時間の推移を確認できます。",
+                }
+            )
         except Exception as exc:
             st.warning(f"分野別時間グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
 
-    st.subheader("確信度と正答の相関")
     valid_conf = merged.dropna(subset=["confidence"])
     if valid_conf.empty:
         st.info("確信度データがまだ十分ではありません。学習時にスライダーで自己評価してみましょう。")
     else:
         corr = valid_conf["confidence"].corr(valid_conf["is_correct"])
-        st.metric("相関係数", f"{corr:.2f}")
         try:
             scatter = (
                 alt.Chart(valid_conf)
@@ -3663,12 +3952,20 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     tooltip=["category", "topic", "confidence", "is_correct", "seconds"],
                 )
             )
-            st.altair_chart(scatter, use_container_width=True)
+            chart_items.append(
+                {
+                    "title": "確信度と正答の相関",
+                    "render": lambda corr=corr, chart=scatter: (
+                        st.metric("相関係数", f"{corr:.2f}"),
+                        st.altair_chart(chart, use_container_width=True),
+                    ),
+                    "description": "自己評価の確信度と正誤の関係を可視化します。",
+                }
+            )
         except Exception as exc:
             st.warning(f"相関散布図を表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
 
-    st.subheader("ひっかけ語彙ヒートマップ")
     heatmap_df = compute_tricky_vocab_heatmap(merged, df)
     if heatmap_df.empty:
         st.info("誤答語彙の十分なデータがありません。")
@@ -3687,10 +3984,20 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                     tooltip=["word", "category", "count"],
                 )
             )
-            st.altair_chart(heatmap, use_container_width=True)
+            chart_items.append(
+                {
+                    "title": "ひっかけ語彙ヒートマップ",
+                    "render": lambda chart=heatmap: st.altair_chart(chart, use_container_width=True),
+                    "description": "誤答が多い語彙と分野の組み合わせを強調表示します。",
+                }
+            )
         except Exception as exc:
             st.warning(f"語彙ヒートマップを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
+
+    if chart_items:
+        st.subheader("ビジュアル分析")
+        render_chart_carousel(chart_items, key="stats_insights")
 
     st.subheader("最も改善した論点")
     improvement = compute_most_improved_topic(merged, df)
@@ -4220,7 +4527,7 @@ def render_settings() -> None:
     settings = st.session_state["settings"]
     st.info("学習体験を自分好みにカスタマイズできます。各項目の説明を参考に調整してください。")
     theme_options = ["ライト", "ダーク", "セピア"]
-    current_theme = settings.get("theme", "セピア")
+    current_theme = settings.get("theme", "ライト")
     theme_index = theme_options.index(current_theme) if current_theme in theme_options else 0
     settings["theme"] = st.selectbox(
         "テーマ",
