@@ -1,5 +1,6 @@
 import datetime as dt
 import hashlib
+import html
 import io
 import json
 import random
@@ -1546,6 +1547,9 @@ def inject_ui_styles() -> None:
         return
     inject_style(
         """
+.takken-choice-button {
+    transition: filter 0.2s ease;
+}
 .takken-choice-button button {
     width: 100%;
     min-height: 56px;
@@ -1559,6 +1563,28 @@ def inject_ui_styles() -> None:
     white-space: normal;
     padding: 0.75rem 1rem;
     gap: 0.75rem;
+    border-width: 1.5px;
+}
+.takken-choice-button.is-selected:not(.is-graded) button {
+    border-color: #4c6ef5 !important;
+    box-shadow: 0 0 0 2px rgba(76, 110, 245, 0.18);
+}
+.takken-choice-button.is-correct button {
+    background-color: #f0f9f4 !important;
+    border-color: #2f9e44 !important;
+    color: #1b4332 !important;
+}
+.takken-choice-button.is-incorrect button {
+    background-color: #fff5f5 !important;
+    border-color: #e03131 !important;
+    color: #871b1b !important;
+}
+.takken-choice-button.is-dimmed button {
+    filter: grayscale(0.25);
+    opacity: 0.7;
+}
+.takken-choice-button.is-graded button {
+    cursor: default;
 }
 .takken-choice-grid {
     display: grid;
@@ -1594,6 +1620,20 @@ def inject_ui_styles() -> None:
 }
 [data-testid="stMarkdownContainer"] * {
     text-align: left !important;
+}
+.takken-feedback-summary {
+    margin-top: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: #f5f7fb;
+    border-radius: 0.75rem;
+    font-weight: 500;
+    color: #36435a;
+    display: inline-flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+}
+.takken-feedback-summary strong {
+    font-weight: 600;
 }
 """,
         "takken-ui-styles",
@@ -3049,6 +3089,9 @@ def render_question_interaction(
         st.session_state[confidence_key] = 50
         st.session_state[order_key] = None
         st.session_state[explanation_key] = False
+    feedback = st.session_state.get(feedback_key)
+    if feedback and feedback.get("question_id") != row["id"]:
+        feedback = None
     choices = [row.get(f"choice{i}", "") for i in range(1, 5)]
     base_order = list(range(4))
     if st.session_state["settings"].get("shuffle_choices", True):
@@ -3084,6 +3127,23 @@ def render_question_interaction(
     render_law_reference(row)
     st.markdown(row["question"], unsafe_allow_html=True)
     selected_choice = st.session_state.get(selected_key)
+    graded_selected_choice: Optional[int] = None
+    correct_choice_idx: Optional[int] = None
+    explanation_summary = ""
+    explanation_value = row.get("explanation")
+    if pd.notna(explanation_value) and str(explanation_value).strip():
+        explanation_summary, _ = parse_explanation_sections(explanation_value)
+    if feedback:
+        graded_selected_choice = feedback.get("selected_choice")
+        correct_choice = feedback.get("correct_choice")
+        if isinstance(correct_choice, int):
+            correct_choice_idx = correct_choice - 1
+    display_selected_choice = (
+        graded_selected_choice
+        if graded_selected_choice is not None
+        else selected_choice
+    )
+    is_graded = feedback is not None and feedback.get("question_id") == row["id"]
     button_labels: List[str] = []
     for idx in range(0, len(order), 2):
         cols = st.columns(2)
@@ -3096,18 +3156,35 @@ def render_question_interaction(
             display_label = f"{choice_labels[actual_idx]} {label_text}".strip()
             button_labels.append(display_label or choice_labels[actual_idx])
             button_key = f"{key_prefix}_choice_{row['id']}_{actual_idx}"
-            button_type = "primary" if selected_choice == actual_idx else "secondary"
+            wrapper_classes = ["takken-choice-button"]
+            if is_graded:
+                wrapper_classes.append("is-graded")
+                if actual_idx == correct_choice_idx:
+                    wrapper_classes.append("is-correct")
+                elif graded_selected_choice == actual_idx:
+                    wrapper_classes.append("is-incorrect")
+                else:
+                    wrapper_classes.append("is-dimmed")
+            if display_selected_choice == actual_idx and not is_graded:
+                wrapper_classes.append("is-selected")
+            button_type = (
+                "primary" if display_selected_choice == actual_idx and not is_graded else "secondary"
+            )
             with cols[col_idx]:
-                st.markdown('<div class="takken-choice-button">', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="{" ".join(wrapper_classes)}">',
+                    unsafe_allow_html=True,
+                )
                 if st.button(
                     display_label or choice_labels[actual_idx],
                     key=button_key,
                     use_container_width=True,
                     type=button_type,
                 ):
-                    st.session_state[selected_key] = actual_idx
-                    selected_choice = actual_idx
-                    safe_rerun()
+                    if not is_graded:
+                        st.session_state[selected_key] = actual_idx
+                        selected_choice = actual_idx
+                        safe_rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
     st.caption("1〜4キーで選択肢を即答できます。E:解説 F:フラグ N/P:移動 H:ヘルプ R:SRSリセット")
     confidence_value = st.session_state.get(confidence_key)
@@ -3130,6 +3207,7 @@ def render_question_interaction(
     help_label = "ヘルプ"
     auto_advance_enabled = st.session_state["settings"].get("auto_advance", False)
     grade_clicked = False
+    needs_rerun_after_grade = False
     help_visible = st.session_state.get(help_state_key, False)
     action_buttons = [
         {
@@ -3248,6 +3326,7 @@ def render_question_interaction(
                     "question_id": row["id"],
                     "confidence": confidence_value,
                     "grade": grade_value,
+                    "selected_choice": selected_choice,
                 }
                 feedback = st.session_state[feedback_key]
                 if log_attempts:
@@ -3269,10 +3348,20 @@ def render_question_interaction(
                     time.sleep(0.8)
                     navigation.on_next()
                     safe_rerun()
+                    needs_rerun_after_grade = False
+                else:
+                    needs_rerun_after_grade = True
+    if grade_clicked and needs_rerun_after_grade:
+        safe_rerun()
     if feedback and feedback.get("question_id") == row["id"]:
         correct_msg = choice_labels[feedback["correct_choice"] - 1]
         message = "正解です！" if feedback["is_correct"] else f"不正解。正答は {correct_msg}"
         (st.success if feedback["is_correct"] else st.error)(message)
+        if explanation_summary:
+            summary_html = (
+                f'<div class="takken-feedback-summary">💡 <span>{html.escape(explanation_summary)}</span></div>'
+            )
+            st.markdown(summary_html, unsafe_allow_html=True)
         st.caption(
             f"確信度 {feedback.get('confidence', confidence_value)}% → 復習グレード {feedback.get('grade', '')}"
         )
