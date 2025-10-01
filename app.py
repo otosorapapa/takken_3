@@ -33,6 +33,9 @@ from sqlalchemy.sql import insert as sa_insert, text, update
 
 from law_updates import (DEFAULT_LAW_SOURCES, LawRevisionAnalyzer,
                          LawUpdateResult, LawUpdateSyncService)
+from integrations import (GoogleCalendarClient, GoogleCalendarConfig,
+                          IntegrationConfigError, IntegrationError,
+                          NotionClient, NotionConfig, OAuthCredentials)
 
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "takken.db"
@@ -854,6 +857,29 @@ class DBManager:
                     grade=grade,
                 )
             )
+
+    def bulk_insert_attempts(self, attempts: Sequence[Dict[str, object]]) -> int:
+        if not attempts:
+            return 0
+        payloads = []
+        for item in attempts:
+            payload = {
+                "question_id": item.get("question_id"),
+                "selected": item.get("selected"),
+                "is_correct": item.get("is_correct"),
+                "seconds": item.get("seconds"),
+                "mode": item.get("mode"),
+                "exam_id": item.get("exam_id"),
+                "confidence": item.get("confidence"),
+                "grade": item.get("grade"),
+            }
+            created_at = item.get("created_at")
+            if created_at is not None:
+                payload["created_at"] = created_at
+            payloads.append(payload)
+        with self.engine.begin() as conn:
+            conn.execute(sa_insert(attempts_table), payloads)
+        return len(payloads)
 
     def fetch_srs(self, question_id: str) -> Optional[pd.Series]:
         with self.engine.connect() as conn:
@@ -2098,6 +2124,169 @@ def compute_most_improved_topic(attempts: pd.DataFrame, df: pd.DataFrame) -> Opt
     return best
 
 
+def build_notion_summaries(attempts: pd.DataFrame, days: int = 7) -> List[Dict[str, object]]:
+    if attempts.empty:
+        return []
+    working = attempts.copy()
+    working["created_at"] = pd.to_datetime(working["created_at"])
+    cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=days)
+    working = working[working["created_at"] >= cutoff]
+    if working.empty:
+        return []
+    working["is_correct"] = working["is_correct"].fillna(0).astype(int)
+    summary = (
+        working
+        .groupby(working["created_at"].dt.date)
+        .agg(
+            attempts=("question_id", "count"),
+            correct=("is_correct", "sum"),
+            avg_seconds=("seconds", "mean"),
+        )
+        .reset_index()
+        .rename(columns={"created_at": "date"})
+    )
+    summary["accuracy"] = summary.apply(
+        lambda row: (row["correct"] / row["attempts"]) if row["attempts"] else 0.0,
+        axis=1,
+    )
+    summary["avg_seconds"] = summary["avg_seconds"].fillna(0.0)
+    results: List[Dict[str, object]] = []
+    for row in summary.itertuples(index=False):
+        date_value = row.date if hasattr(row, "date") else row[0]
+        if isinstance(date_value, dt.datetime):
+            date_value = date_value.date()
+        results.append(
+            {
+                "date": date_value,
+                "attempts": int(row.attempts),
+                "accuracy": float(row.accuracy),
+                "avg_seconds": float(row.avg_seconds),
+            }
+        )
+    return results
+
+
+def parse_external_attempt_logs(
+    file: "UploadedFile", questions_df: pd.DataFrame
+) -> Tuple[List[Dict[str, object]], List[str]]:
+    suffix = Path(file.name).suffix.lower()
+    raw_bytes = file.getvalue()
+    errors: List[str] = []
+    if not raw_bytes:
+        return [], [f"{file.name}: ファイルが空です。"]
+    try:
+        decoded = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            decoded = raw_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return [], [f"{file.name}: UTF-8でデコードできませんでした。"]
+    if suffix == ".csv":
+        data_df = pd.read_csv(io.StringIO(decoded))
+    elif suffix == ".json":
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            return [], [f"{file.name}: JSONの読み込みに失敗しました ({exc})"]
+        if isinstance(payload, dict):
+            if "records" in payload and isinstance(payload["records"], list):
+                payload = payload["records"]
+            elif "data" in payload and isinstance(payload["data"], list):
+                payload = payload["data"]
+            else:
+                payload = [payload]
+        data_df = pd.DataFrame(payload)
+    else:
+        return [], [f"{file.name}: 対応していない形式です。CSVまたはJSONを使用してください。"]
+    if data_df.empty:
+        return [], [f"{file.name}: 取り込み可能なデータがありません。"]
+    normalized_columns = {col.lower(): col for col in data_df.columns}
+    if "seconds" not in normalized_columns:
+        return [], [f"{file.name}: seconds 列が必要です。"]
+    seconds_col = normalized_columns["seconds"]
+    question_id_col = normalized_columns.get("question_id")
+    timestamp_col = normalized_columns.get("timestamp") or normalized_columns.get("created_at")
+    year_col = normalized_columns.get("year")
+    qno_col = normalized_columns.get("q_no") or normalized_columns.get("qno")
+    topic_col = normalized_columns.get("topic")
+    mode_col = normalized_columns.get("mode")
+    selected_col = normalized_columns.get("selected")
+    correct_col = normalized_columns.get("is_correct")
+    confidence_col = normalized_columns.get("confidence")
+    grade_col = normalized_columns.get("grade")
+
+    resolved: List[Dict[str, object]] = []
+    question_index = questions_df.set_index("id") if "id" in questions_df.columns else pd.DataFrame()
+    for idx, row in data_df.iterrows():
+        question_id = None
+        if question_id_col and pd.notna(row.get(question_id_col)):
+            candidate = str(row.get(question_id_col)).strip()
+            if not question_index.empty and candidate in question_index.index:
+                question_id = candidate
+        if not question_id and year_col and qno_col and pd.notna(row.get(year_col)) and pd.notna(row.get(qno_col)):
+            try:
+                year_val = int(row.get(year_col))
+                qno_val = int(row.get(qno_col))
+            except (TypeError, ValueError):
+                year_val = qno_val = None
+            if year_val is not None and qno_val is not None:
+                matches = questions_df[
+                    (questions_df["year"] == year_val) & (questions_df["q_no"] == qno_val)
+                ]
+                if not matches.empty:
+                    question_id = matches.iloc[0]["id"]
+        if not question_id and topic_col and pd.notna(row.get(topic_col)):
+            topic_val = str(row.get(topic_col)).strip()
+            matches = questions_df[questions_df["topic"] == topic_val]
+            if not matches.empty:
+                question_id = matches.iloc[0]["id"]
+        if not question_id:
+            errors.append(f"{file.name} 行{idx + 1}: 対応する問題IDを特定できませんでした。")
+            continue
+        try:
+            seconds = int(float(row.get(seconds_col, 0)))
+        except (TypeError, ValueError):
+            errors.append(f"{file.name} 行{idx + 1}: seconds 列が数値ではありません。")
+            continue
+        timestamp_value = row.get(timestamp_col) if timestamp_col else None
+        if pd.notna(timestamp_value):
+            try:
+                created_at = pd.to_datetime(timestamp_value)
+            except Exception:
+                created_at = pd.Timestamp.utcnow()
+        else:
+            created_at = pd.Timestamp.utcnow()
+        payload: Dict[str, object] = {
+            "question_id": question_id,
+            "seconds": seconds,
+            "mode": str(row.get(mode_col, "external_log")) if mode_col else "external_log",
+            "created_at": created_at.to_pydatetime() if hasattr(created_at, "to_pydatetime") else created_at,
+        }
+        if selected_col and pd.notna(row.get(selected_col)):
+            try:
+                payload["selected"] = int(row.get(selected_col))
+            except (TypeError, ValueError):
+                payload["selected"] = None
+        if correct_col and pd.notna(row.get(correct_col)):
+            value = row.get(correct_col)
+            try:
+                payload["is_correct"] = int(bool(int(value)))
+            except (TypeError, ValueError):
+                payload["is_correct"] = None
+        if confidence_col and pd.notna(row.get(confidence_col)):
+            try:
+                payload["confidence"] = int(float(row.get(confidence_col)))
+            except (TypeError, ValueError):
+                payload["confidence"] = None
+        if grade_col and pd.notna(row.get(grade_col)):
+            try:
+                payload["grade"] = int(float(row.get(grade_col)))
+            except (TypeError, ValueError):
+                payload["grade"] = None
+        resolved.append(payload)
+    return resolved, errors
+
+
 def register_keyboard_shortcuts(mapping: Dict[str, str]) -> None:
     if not mapping:
         return
@@ -2231,8 +2420,35 @@ def init_session_state() -> None:
             "auto_advance": False,
             "review_low_confidence_threshold": 60,
             "review_elapsed_days": 7,
+            "integrations": {
+                "google_calendar": {
+                    "client_id": "",
+                    "client_secret": "",
+                    "redirect_uri": "",
+                    "access_token": "",
+                    "refresh_token": "",
+                    "calendar_id": "primary",
+                },
+                "notion": {
+                    "integration_token": "",
+                    "database_id": "",
+                    "notion_version": "2022-06-28",
+                },
+            },
         },
         "_nav_widget": "ホーム",
+        "integration_status": {
+            "google_calendar": {
+                "last_synced": None,
+                "message": "未同期",
+                "success": False,
+            },
+            "notion": {
+                "last_synced": None,
+                "message": "未同期",
+                "success": False,
+            },
+        },
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -4219,6 +4435,137 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
             mime="text/csv",
             help="最新の法改正論点を整理した問題サンプルです。改正年度や施行日を追記してご利用ください。",
         )
+    st.markdown("### 外部サービス同期")
+    integrations = st.session_state["settings"].setdefault("integrations", {})
+    integration_status = st.session_state.setdefault(
+        "integration_status",
+        {
+            "google_calendar": {"last_synced": None, "message": "未同期", "success": False},
+            "notion": {"last_synced": None, "message": "未同期", "success": False},
+        },
+    )
+    google_settings = integrations.get("google_calendar", {})
+    google_status = integration_status.setdefault(
+        "google_calendar", {"last_synced": None, "message": "未同期", "success": False}
+    )
+    notion_settings = integrations.get("notion", {})
+    notion_status = integration_status.setdefault(
+        "notion", {"last_synced": None, "message": "未同期", "success": False}
+    )
+    sync_cols = st.columns(2)
+    with sync_cols[0]:
+        st.markdown("#### Google Calendar")
+        last_synced = google_status.get("last_synced")
+        message = google_status.get("message", "未同期")
+        if last_synced:
+            st.caption(f"最終同期: {last_synced} / {message}")
+        else:
+            st.caption(f"状態: {message}")
+        allow_resync = False
+        if google_status.get("success"):
+            allow_resync = st.checkbox("再同期を許可", key="google_calendar_resync")
+        google_disabled = google_status.get("success") and not allow_resync
+        if st.button("スケジュールをGoogle Calendarへ同期", disabled=google_disabled):
+            due_df = db.get_due_srs()
+            if due_df.empty:
+                msg = "同期対象の学習スケジュールがありません。"
+                google_status.update({"message": msg, "success": False})
+                st.info(msg)
+            else:
+                credentials = OAuthCredentials(
+                    client_id=google_settings.get("client_id", ""),
+                    client_secret=google_settings.get("client_secret", ""),
+                    redirect_uri=google_settings.get("redirect_uri", ""),
+                    access_token=google_settings.get("access_token", ""),
+                    refresh_token=google_settings.get("refresh_token", ""),
+                )
+                client = GoogleCalendarClient(
+                    GoogleCalendarConfig(credentials=credentials, calendar_id=google_settings.get("calendar_id", "primary"))
+                )
+                try:
+                    result = client.sync_study_schedule(due_df)
+                except IntegrationConfigError as exc:
+                    msg = str(exc)
+                    google_status.update({"message": msg, "success": False})
+                    st.error(msg)
+                except IntegrationError as exc:
+                    msg = str(exc)
+                    google_status.update({"message": msg, "success": False})
+                    st.error(msg)
+                else:
+                    now_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    detail = f"イベント {result['created']} 件を同期しました。"
+                    if result.get("failures"):
+                        detail += f" 一部失敗 {len(result['failures'])} 件。"
+                    google_status.update({"message": detail, "success": True, "last_synced": now_text})
+                    st.success(detail)
+    with sync_cols[1]:
+        st.markdown("#### Notion")
+        last_synced = notion_status.get("last_synced")
+        message = notion_status.get("message", "未同期")
+        if last_synced:
+            st.caption(f"最終同期: {last_synced} / {message}")
+        else:
+            st.caption(f"状態: {message}")
+        allow_resync = False
+        if notion_status.get("success"):
+            allow_resync = st.checkbox("再同期を許可", key="notion_resync")
+        notion_disabled = notion_status.get("success") and not allow_resync
+        notion_days = st.slider("送信対象日数", min_value=1, max_value=30, value=7, key="notion_sync_days")
+        if st.button("学習ログをNotionデータベースへ送信", disabled=notion_disabled):
+            attempts = db.get_attempt_stats()
+            summaries = build_notion_summaries(attempts, days=notion_days)
+            client = NotionClient(
+                NotionConfig(
+                    integration_token=notion_settings.get("integration_token", ""),
+                    database_id=notion_settings.get("database_id", ""),
+                    notion_version=notion_settings.get("notion_version", "2022-06-28"),
+                )
+            )
+            if not summaries:
+                msg = "送信対象の学習ログがありません。"
+                notion_status.update({"message": msg, "success": False})
+                st.info(msg)
+            else:
+                try:
+                    result = client.sync_learning_log(summaries)
+                except IntegrationConfigError as exc:
+                    msg = str(exc)
+                    notion_status.update({"message": msg, "success": False})
+                    st.error(msg)
+                except IntegrationError as exc:
+                    msg = str(exc)
+                    notion_status.update({"message": msg, "success": False})
+                    st.error(msg)
+                else:
+                    now_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    detail = f"{result['created']} 日分の学習ログを送信しました。"
+                    if result.get("failures"):
+                        detail += f" 送信失敗 {len(result['failures'])} 件。"
+                    notion_status.update({"message": detail, "success": True, "last_synced": now_text})
+                    st.success(detail)
+    st.markdown("### 学習時間ログ取り込み")
+    st.caption("スマートウォッチや外部記録ツールから出力したCSV/JSONをアップロードすると attempts に反映します。question_id、または年度と問番号で問題を特定します。")
+    log_files = st.file_uploader(
+        "学習ログファイルを選択",
+        type=["csv", "json"],
+        accept_multiple_files=True,
+        key="external_log_uploader",
+    )
+    if log_files and st.button("学習ログを登録", key="external_log_apply"):
+        questions_df = load_questions_df()
+        total_inserted = 0
+        parse_errors: List[str] = []
+        for log_file in log_files:
+            records, errors = parse_external_attempt_logs(log_file, questions_df)
+            parse_errors.extend(errors)
+            if records:
+                total_inserted += db.bulk_insert_attempts(records)
+        if total_inserted:
+            st.success(f"{total_inserted}件の学習ログを追加しました。")
+        if parse_errors:
+            for err in parse_errors:
+                st.warning(err)
     st.caption("サンプルCSVはExcelに貼り付けて使えるよう列幅を調整済みです。コピー&ペーストで手早く登録できます。")
     st.markdown("### 法改正自動更新")
     st.caption("不動産適正取引推進機構や専門予備校の公開フィードを HTTP 経由で取得し、自動で法改正問題を生成・登録します。")
@@ -4841,6 +5188,71 @@ def render_settings(db: DBManager) -> None:
             help="最終挑戦からこの日数が経過した問題を復習候補に追加します。",
             key=elapsed_key,
         )
+        integrations = settings.setdefault("integrations", {})
+        st.markdown("#### 外部サービス連携設定")
+        st.caption("Google Calendar や Notion 連携に必要なOAuth情報を入力してください。値はブラウザセッション内で保持されます。")
+        with st.expander("Google Calendar 連携"):
+            google_config = integrations.setdefault(
+                "google_calendar",
+                {
+                    "client_id": "",
+                    "client_secret": "",
+                    "redirect_uri": "",
+                    "access_token": "",
+                    "refresh_token": "",
+                    "calendar_id": "primary",
+                },
+            )
+            google_config["client_id"] = st.text_input("Client ID", value=google_config.get("client_id", ""))
+            google_config["client_secret"] = st.text_input(
+                "Client Secret",
+                value=google_config.get("client_secret", ""),
+                type="password",
+            )
+            google_config["redirect_uri"] = st.text_input(
+                "Redirect URI",
+                value=google_config.get("redirect_uri", ""),
+                help="OAuth同意画面で設定したリダイレクトURLを入力してください。",
+            )
+            google_config["access_token"] = st.text_input(
+                "Access Token",
+                value=google_config.get("access_token", ""),
+                type="password",
+                help="有効なアクセストークンを入力すると即時同期できます。",
+            )
+            google_config["refresh_token"] = st.text_input(
+                "Refresh Token",
+                value=google_config.get("refresh_token", ""),
+                type="password",
+            )
+            google_config["calendar_id"] = st.text_input(
+                "対象カレンダーID",
+                value=google_config.get("calendar_id", "primary"),
+                help="primary のままにするとメインカレンダーへ書き込みます。",
+            )
+        with st.expander("Notion 連携"):
+            notion_config = integrations.setdefault(
+                "notion",
+                {
+                    "integration_token": "",
+                    "database_id": "",
+                    "notion_version": "2022-06-28",
+                },
+            )
+            notion_config["integration_token"] = st.text_input(
+                "Integration Token",
+                value=notion_config.get("integration_token", ""),
+                type="password",
+            )
+            notion_config["database_id"] = st.text_input(
+                "データベースID",
+                value=notion_config.get("database_id", ""),
+            )
+            notion_config["notion_version"] = st.text_input(
+                "Notion-Version",
+                value=notion_config.get("notion_version", "2022-06-28"),
+                help="Notion APIのバージョン文字列を必要に応じて変更してください。",
+            )
         if st.button(
             "TF-IDFを再学習",
             help="検索精度が気になるときに再計算します。データ更新後の再実行がおすすめです。",
