@@ -2601,10 +2601,23 @@ def render_year_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
 def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
     st.subheader("弱点克服モード")
     st.caption("誤答・低正答率・時間超過が目立つ問題を優先的に出題し、得点の底上げを図ります。")
+    review_focus_ids = st.session_state.get("review_focus_ids")
+    focus_ids: Set[str] = set()
     attempts = db.get_attempt_stats()
     if attempts.empty:
+        if review_focus_ids:
+            st.session_state.pop("review_focus_ids", None)
         st.info("学習履歴がまだありません。本試験モードやドリルで取り組んでみましょう。")
         return
+    if review_focus_ids:
+        focus_ids = {str(qid) for qid in review_focus_ids if qid}
+        attempts = attempts[attempts["question_id"].isin(focus_ids)]
+        if attempts.empty:
+            st.session_state.pop("review_focus_ids", None)
+            st.info("指定された復習対象の問題が見つかりませんでした。条件を確認してください。")
+            return
+        st.session_state.pop("review_focus_ids", None)
+        st.success("直近の模試で誤答した問題に絞り込んで表示しています。")
     summary = (
         attempts.groupby(["question_id", "category"])
         .agg(
@@ -2718,6 +2731,8 @@ def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
             ),
         },
     )
+    if focus_ids:
+        filtered = filtered[filtered["question_id"].isin(focus_ids)]
     candidates = filtered[~filtered["id"].isna()]
     if candidates.empty:
         st.info("弱点候補の問題を特定できませんでした。履歴を増やしましょう。")
@@ -3210,6 +3225,7 @@ def evaluate_exam_attempt(
         if not is_correct and correct_choice in range(1, 5):
             wrong_choices.append(
                 {
+                    "question_id": qid,
                     "question": f"{row['year']}年 問{row['q_no']}",
                     "selected": choice,
                     "correct": correct_choice,
@@ -3242,6 +3258,7 @@ def evaluate_exam_attempt(
     answered = len(responses)
     unanswered = total_questions - answered
     expected_final = correct + unanswered * (correct / max(answered, 1)) if answered else 0
+    wrong_ids = [str(choice.get("question_id")) for choice in wrong_choices if choice.get("question_id")]
     result_payload = {
         "score": correct,
         "total": total_questions,
@@ -3249,6 +3266,7 @@ def evaluate_exam_attempt(
         "pass_line": pass_line,
         "per_category": per_category,
         "wrong_choices": wrong_choices,
+        "wrong_ids": wrong_ids,
         "remaining_time": remaining_time,
         "expected_final": expected_final,
         "mode": session.mode,
@@ -3321,6 +3339,41 @@ def display_exam_result(result: Dict[str, object]) -> None:
         st.dataframe(
             wrong_df[["question", "category", "選択肢", "正解肢"]],
             use_container_width=True,
+        )
+    wrong_ids = result.get("wrong_ids", [])
+    action_cols = st.columns(3)
+
+    def go_to_review() -> None:
+        if wrong_ids:
+            st.session_state["review_focus_ids"] = list(wrong_ids)
+        navigate_to("学習")
+
+    def restart_mock() -> None:
+        st.session_state.pop("exam_session", None)
+        st.session_state.pop("exam_result_模試", None)
+        navigate_to("模試")
+
+    def go_to_stats() -> None:
+        navigate_to("統計")
+
+    with action_cols[0]:
+        st.button(
+            "弱点を復習する",
+            use_container_width=True,
+            disabled=not wrong_ids,
+            on_click=with_rerun(go_to_review),
+        )
+    with action_cols[1]:
+        st.button(
+            "模試を再挑戦",
+            use_container_width=True,
+            on_click=with_rerun(restart_mock),
+        )
+    with action_cols[2]:
+        st.button(
+            "統計ダッシュボードへ",
+            use_container_width=True,
+            on_click=with_rerun(go_to_stats),
         )
 
 
@@ -3870,7 +3923,16 @@ def render_mock_exam(db: DBManager, df: pd.DataFrame) -> None:
 def render_srs(db: DBManager, parent_nav: str = "学習") -> None:
     render_specialized_header(parent_nav, "弱点復習", "srs")
     st.subheader("弱点復習")
+    review_focus_ids = st.session_state.get("review_focus_ids")
     due_df = db.get_due_srs()
+    if review_focus_ids:
+        focus_ids = {str(qid) for qid in review_focus_ids if qid}
+        due_df = due_df[due_df["question_id"].isin(focus_ids)]
+        st.session_state.pop("review_focus_ids", None)
+        if due_df.empty:
+            st.info("SRSキューに復習対象の問題がありません。弱点分析タブを確認してください。")
+            return
+        st.success("直近の模試で誤答した問題に絞り込んで表示しています。")
     if due_df.empty:
         st.info("今日復習すべき問題はありません。")
         return
