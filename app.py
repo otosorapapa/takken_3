@@ -355,6 +355,27 @@ def handle_nav_change() -> None:
     st.session_state["nav"] = st.session_state.get("_nav_widget", "ホーム")
 
 
+def navigate_to(section: str) -> None:
+    st.session_state["nav"] = section
+    st.session_state["_nav_widget"] = section
+    safe_rerun()
+
+
+def render_specialized_header(parent_label: str, current_label: str, key_suffix: str) -> None:
+    breadcrumb = f"{parent_label} ＞ {current_label}"
+    cols = st.columns([5, 1])
+    with cols[0]:
+        st.markdown(f"**{breadcrumb}**")
+    with cols[1]:
+        st.button(
+            "戻る",
+            key=f"back_{key_suffix}",
+            use_container_width=True,
+            help=f"{parent_label}に戻ります。",
+            on_click=with_rerun(navigate_to, parent_label),
+        )
+
+
 QUESTION_TEMPLATE_COLUMNS = [
     "year",
     "q_no",
@@ -1742,7 +1763,7 @@ def render_explanation_content(row: pd.Series) -> None:
     explanation = row.get("explanation", "")
     summary, sections = parse_explanation_sections(explanation)
     if not explanation:
-        st.write("解説が未登録です。データ入出力から解答データを取り込みましょう。")
+        st.write("解説が未登録です。『設定 ＞ データ入出力』から解答データを取り込みましょう。")
         return
     st.markdown(f"**要点版**：{summary}")
     with st.expander("詳細解説をひらく", expanded=False):
@@ -2044,23 +2065,16 @@ def main() -> None:
     sidebar.title("宅建10年ドリル")
     if st.session_state.get("_nav_widget") != st.session_state.get("nav"):
         st.session_state["_nav_widget"] = st.session_state.get("nav", "ホーム")
-    menu_options = [
-        "ホーム",
-        "学習モード",
-        "法改正対策",
-        "予想問題演習",
-        "模試",
-        "弱点復習",
-        "統計",
-        "データ入出力",
-        "設定",
-    ]
+    menu_options = ["ホーム", "学習", "模試", "統計", "設定"]
+    current_nav = st.session_state.get("nav", "ホーム")
+    if current_nav not in menu_options:
+        current_nav = "ホーム"
+        st.session_state["nav"] = current_nav
+        st.session_state["_nav_widget"] = current_nav
     sidebar.radio(
         "メニュー",
         menu_options,
-        index=menu_options.index(
-            st.session_state.get("nav", "ホーム")
-        ),
+        index=menu_options.index(current_nav),
         key="_nav_widget",
         on_change=with_rerun(handle_nav_change),
     )
@@ -2071,36 +2085,24 @@ def main() -> None:
             "\n".join(
                 [
                     "- **ホーム**：進捗サマリーと最近のインポート履歴を確認できます。",
-                    "- **学習モード**：目的別タブから本試験演習やドリル、適応学習を選択します。",
-                    "- **法改正対策**：最新の改正論点に特化した問題演習を行えます。",
-                    "- **予想問題演習**：アップロードした直前対策用の予想問題を解きます。",
+                    "- **学習**：演習プラン・特別対策・弱点ケアのタブから目的に応じて学習モードを選択します。",
                     "- **模試**：年度や出題方式を指定して本番同様の模試を開始します。",
-                    "- **弱点復習**：SRSの期限が来た問題をまとめて復習します。",
                     "- **統計**：分野別の成績や時間分析を把握できます。",
-                    "- **データ入出力**：CSV/ZIPの取り込みや履歴エクスポートを行います。",
-                    "- **設定**：タイマーやシャッフルなど学習体験の好みを調整します。",
+                    "- **設定**：表示設定の調整と『設定 ＞ データ入出力』タブでのCSV/ZIP取り込みをまとめています。",
                 ]
             )
         )
 
     if nav == "ホーム":
         render_home(db, df)
-    elif nav == "学習モード":
+    elif nav == "学習":
         render_learning(db, df)
-    elif nav == "法改正対策":
-        render_law_revision_lane(db)
-    elif nav == "予想問題演習":
-        render_predicted_lane(db)
     elif nav == "模試":
         render_mock_exam(db, df)
-    elif nav == "弱点復習":
-        render_srs(db)
     elif nav == "統計":
         render_stats(db, df)
-    elif nav == "データ入出力":
-        render_data_io(db)
     elif nav == "設定":
-        render_settings()
+        render_settings(db)
 
 
 def render_home(db: DBManager, df: pd.DataFrame) -> None:
@@ -2115,7 +2117,7 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
     with col3:
         coverage = attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
         st.metric("年度カバレッジ", f"{coverage:.0f}%")
-    st.info("過去問データと解答データをアップロードして学習を開始しましょう。サイドバーの『データ入出力』から取り込めます。")
+    st.info("過去問データと解答データをアップロードして学習を開始しましょう。『設定 ＞ データ入出力』から取り込めます。")
     st.markdown("### 最近のインポート")
     with db.engine.connect() as conn:
         logs = pd.read_sql(select(import_logs_table).order_by(import_logs_table.c.id.desc()).limit(5), conn)
@@ -2126,35 +2128,33 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
 
 
 def render_learning(db: DBManager, df: pd.DataFrame) -> None:
-    st.title("学習モード")
+    st.title("学習")
     if df.empty:
-        st.warning("設問データがありません。『データ入出力』からアップロードしてください。")
+        st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
         return
-    tabs = st.tabs(
-        [
-            "本試験モード",
-            "適応学習",
-            "分野別ドリル",
-            "年度別演習",
-            "弱点克服モード",
-            "法改正対策",
-            "予想問題演習",
-        ]
-    )
-    with tabs[0]:
-        render_full_exam_lane(db, df)
-    with tabs[1]:
-        render_adaptive_lane(db, df)
-    with tabs[2]:
-        render_subject_drill_lane(db, df)
-    with tabs[3]:
-        render_year_drill_lane(db, df)
-    with tabs[4]:
-        render_weakness_lane(db, df)
-    with tabs[5]:
-        render_law_revision_lane(db)
-    with tabs[6]:
-        render_predicted_lane(db)
+    primary_tabs = st.tabs(["演習プラン", "特別対策", "弱点ケア"])
+    with primary_tabs[0]:
+        plan_tabs = st.tabs(["本試験モード", "適応学習", "分野別ドリル", "年度別演習"])
+        with plan_tabs[0]:
+            render_full_exam_lane(db, df)
+        with plan_tabs[1]:
+            render_adaptive_lane(db, df)
+        with plan_tabs[2]:
+            render_subject_drill_lane(db, df)
+        with plan_tabs[3]:
+            render_year_drill_lane(db, df)
+    with primary_tabs[1]:
+        special_tabs = st.tabs(["法改正対策", "予想問題演習"])
+        with special_tabs[0]:
+            render_law_revision_lane(db, parent_nav="学習")
+        with special_tabs[1]:
+            render_predicted_lane(db, parent_nav="学習")
+    with primary_tabs[2]:
+        review_tabs = st.tabs(["弱点分析", "SRS復習"])
+        with review_tabs[0]:
+            render_weakness_lane(db, df)
+        with review_tabs[1]:
+            render_srs(db, parent_nav="学習")
 
 
 def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
@@ -2503,12 +2503,13 @@ def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
     render_question_interaction(db, row, attempt_mode="weakness", key_prefix="weakness")
 
 
-def render_law_revision_lane(db: DBManager) -> None:
+def render_law_revision_lane(db: DBManager, parent_nav: str = "学習") -> None:
+    render_specialized_header(parent_nav, "法改正対策", "law_revision")
     st.subheader("法改正対策")
     law_df = db.load_law_revision_questions()
     if law_df.empty:
         st.info(
-            "法改正予想問題データが登録されていません。『データ入出力』タブから law_revision.csv を取り込みましょう。"
+            "法改正予想問題データが登録されていません。『設定 ＞ データ入出力』から law_revision.csv を取り込みましょう。"
         )
         return
     st.caption(
@@ -2730,11 +2731,12 @@ def render_law_revision_lane(db: DBManager) -> None:
     )
 
 
-def render_predicted_lane(db: DBManager) -> None:
+def render_predicted_lane(db: DBManager, parent_nav: str = "学習") -> None:
+    render_specialized_header(parent_nav, "予想問題演習", "predicted")
     st.subheader("予想問題演習")
     predicted_df = db.load_predicted_questions()
     if predicted_df.empty:
-        st.info("予想問題データが登録されていません。『データ入出力』タブからCSVを取り込んでください。")
+        st.info("予想問題データが登録されていません。『設定 ＞ データ入出力』からCSVを取り込んでください。")
         return
     st.caption("アップロードした予想問題を使って直前対策の演習を行います。正答が未設定の場合は自己採点となります。")
     total_questions = len(predicted_df)
@@ -3527,8 +3529,9 @@ def render_mock_exam(db: DBManager, df: pd.DataFrame) -> None:
         display_exam_result(result)
 
 
-def render_srs(db: DBManager) -> None:
-    st.title("弱点復習")
+def render_srs(db: DBManager, parent_nav: str = "学習") -> None:
+    render_specialized_header(parent_nav, "弱点復習", "srs")
+    st.subheader("弱点復習")
     due_df = db.get_due_srs()
     if due_df.empty:
         st.info("今日復習すべき問題はありません。")
@@ -3586,7 +3589,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             merged = merged.drop(columns=[alt_col])
     if merged.empty:
         st.warning("集計対象の設問が特定できませんでした。設問データが削除されていないか確認してください。")
-        st.info("『データ入出力』でquestions.csvを再度取り込み、設問IDと学習履歴の対応を復元できます。")
+        st.info("『設定 ＞ データ入出力』でquestions.csvを再度取り込み、設問IDと学習履歴の対応を復元できます。")
         return
     accuracy_series = merged["is_correct"].dropna()
     seconds_series = merged["seconds"].dropna()
@@ -3708,8 +3711,11 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
         )
     else:
         st.info("改善の傾向を示す論点はまだ検出されていません。継続して学習しましょう。")
-def render_data_io(db: DBManager) -> None:
-    st.title("データ入出力")
+
+
+def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
+    render_specialized_header(parent_nav, "データ入出力", "data_io")
+    st.subheader("データ入出力")
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     st.markdown("### テンプレートファイル")
     st.download_button(
@@ -4276,82 +4282,93 @@ def render_data_io(db: DBManager) -> None:
         st.download_button("解答テンプレCSV", f, file_name="answers_template.csv")
 
 
-def render_settings() -> None:
+def render_settings(db: DBManager) -> None:
     st.title("設定")
-    settings = st.session_state["settings"]
-    st.info("学習体験を自分好みにカスタマイズできます。各項目の説明を参考に調整してください。")
-    theme_options = ["ライト", "ダーク", "セピア"]
-    current_theme = settings.get("theme", "セピア")
-    theme_index = theme_options.index(current_theme) if current_theme in theme_options else 0
-    settings["theme"] = st.selectbox(
-        "テーマ",
-        theme_options,
-        index=theme_index,
-        help="画面の配色を切り替えます。暗い環境ではダークテーマ、長文読解にはセピアテーマがおすすめです。",
-    )
-    size_options = list(FONT_SIZE_SCALE.keys())
-    default_size = settings.get("font_size", "標準")
-    size_index = size_options.index(default_size) if default_size in size_options else size_options.index("標準")
-    settings["font_size"] = st.selectbox(
-        "フォントサイズ",
-        size_options,
-        index=size_index,
-        help="文字サイズを調整して読みやすさを最適化します。『大きい』は夜間学習や高解像度モニタ向きです。",
-    )
-    settings["shuffle_choices"] = st.checkbox(
-        "選択肢をシャッフル",
-        value=settings.get("shuffle_choices", True),
-        help="毎回選択肢の順番をランダムに入れ替えて、位置記憶に頼らない訓練を行います。",
-    )
-    settings["timer"] = st.checkbox(
-        "タイマーを表示",
-        value=settings.get("timer", True),
-        help="回答画面に経過時間を表示して本番同様の時間感覚を養います。",
-    )
-    sm2_key = "settings_sm2_initial_ease"
-    current_sm2 = settings.get("sm2_initial_ease", 2.5)
-    if st.session_state.get(sm2_key) != current_sm2:
-        st.session_state[sm2_key] = current_sm2
-    settings["sm2_initial_ease"] = st.slider(
-        "SM-2初期ease",
-        min_value=1.3,
-        max_value=3.0,
-        value=st.session_state[sm2_key],
-        help="間隔反復アルゴリズムの初期難易度です。既定値2.5で迷ったらそのままにしましょう。",
-        key=sm2_key,
-    )
-    settings["auto_advance"] = st.checkbox(
-        "採点後に自動で次問へ進む (0.8秒遅延)",
-        value=settings.get("auto_advance", False),
-        help="正誤判定後に待機せず次の問題へ進みたい場合に有効化します。",
-    )
-    low_conf_key = "settings_review_low_confidence_threshold"
-    current_low_conf = int(settings.get("review_low_confidence_threshold", 60))
-    if st.session_state.get(low_conf_key) != current_low_conf:
-        st.session_state[low_conf_key] = current_low_conf
-    settings["review_low_confidence_threshold"] = st.slider(
-        "低確信として扱う確信度 (%)",
-        min_value=0,
-        max_value=100,
-        value=st.session_state[low_conf_key],
-        help="自己評価の確信度がこの値未満なら復習対象に含めます。",
-        key=low_conf_key,
-    )
-    elapsed_key = "settings_review_elapsed_days"
-    current_elapsed = int(settings.get("review_elapsed_days", 7))
-    if st.session_state.get(elapsed_key) != current_elapsed:
-        st.session_state[elapsed_key] = current_elapsed
-    settings["review_elapsed_days"] = st.slider(
-        "復習抽出の経過日数しきい値",
-        min_value=1,
-        max_value=30,
-        value=st.session_state[elapsed_key],
-        help="最終挑戦からこの日数が経過した問題を復習候補に追加します。",
-        key=elapsed_key,
-    )
-    if st.button("TF-IDFを再学習", help="検索精度が気になるときに再計算します。データ更新後の再実行がおすすめです。"):
-        rebuild_tfidf_cache()
-        st.success("TF-IDFを再学習しました")
+    tabs = st.tabs(["表示・操作設定", "データ入出力"])
+    with tabs[0]:
+        settings = st.session_state["settings"]
+        st.info("学習体験を自分好みにカスタマイズできます。各項目の説明を参考に調整してください。")
+        theme_options = ["ライト", "ダーク", "セピア"]
+        current_theme = settings.get("theme", "セピア")
+        theme_index = theme_options.index(current_theme) if current_theme in theme_options else 0
+        settings["theme"] = st.selectbox(
+            "テーマ",
+            theme_options,
+            index=theme_index,
+            help="画面の配色を切り替えます。暗い環境ではダークテーマ、長文読解にはセピアテーマがおすすめです。",
+        )
+        size_options = list(FONT_SIZE_SCALE.keys())
+        default_size = settings.get("font_size", "標準")
+        size_index = (
+            size_options.index(default_size)
+            if default_size in size_options
+            else size_options.index("標準")
+        )
+        settings["font_size"] = st.selectbox(
+            "フォントサイズ",
+            size_options,
+            index=size_index,
+            help="文字サイズを調整して読みやすさを最適化します。『大きい』は夜間学習や高解像度モニタ向きです。",
+        )
+        settings["shuffle_choices"] = st.checkbox(
+            "選択肢をシャッフル",
+            value=settings.get("shuffle_choices", True),
+            help="毎回選択肢の順番をランダムに入れ替えて、位置記憶に頼らない訓練を行います。",
+        )
+        settings["timer"] = st.checkbox(
+            "タイマーを表示",
+            value=settings.get("timer", True),
+            help="回答画面に経過時間を表示して本番同様の時間感覚を養います。",
+        )
+        sm2_key = "settings_sm2_initial_ease"
+        current_sm2 = settings.get("sm2_initial_ease", 2.5)
+        if st.session_state.get(sm2_key) != current_sm2:
+            st.session_state[sm2_key] = current_sm2
+        settings["sm2_initial_ease"] = st.slider(
+            "SM-2初期ease",
+            min_value=1.3,
+            max_value=3.0,
+            value=st.session_state[sm2_key],
+            help="間隔反復アルゴリズムの初期難易度です。既定値2.5で迷ったらそのままにしましょう。",
+            key=sm2_key,
+        )
+        settings["auto_advance"] = st.checkbox(
+            "採点後に自動で次問へ進む (0.8秒遅延)",
+            value=settings.get("auto_advance", False),
+            help="正誤判定後に待機せず次の問題へ進みたい場合に有効化します。",
+        )
+        low_conf_key = "settings_review_low_confidence_threshold"
+        current_low_conf = int(settings.get("review_low_confidence_threshold", 60))
+        if st.session_state.get(low_conf_key) != current_low_conf:
+            st.session_state[low_conf_key] = current_low_conf
+        settings["review_low_confidence_threshold"] = st.slider(
+            "低確信として扱う確信度 (%)",
+            min_value=0,
+            max_value=100,
+            value=st.session_state[low_conf_key],
+            help="自己評価の確信度がこの値未満なら復習対象に含めます。",
+            key=low_conf_key,
+        )
+        elapsed_key = "settings_review_elapsed_days"
+        current_elapsed = int(settings.get("review_elapsed_days", 7))
+        if st.session_state.get(elapsed_key) != current_elapsed:
+            st.session_state[elapsed_key] = current_elapsed
+        settings["review_elapsed_days"] = st.slider(
+            "復習抽出の経過日数しきい値",
+            min_value=1,
+            max_value=30,
+            value=st.session_state[elapsed_key],
+            help="最終挑戦からこの日数が経過した問題を復習候補に追加します。",
+            key=elapsed_key,
+        )
+        if st.button(
+            "TF-IDFを再学習",
+            help="検索精度が気になるときに再計算します。データ更新後の再実行がおすすめです。",
+        ):
+            rebuild_tfidf_cache()
+            st.success("TF-IDFを再学習しました")
+    with tabs[1]:
+        render_data_io(db, parent_nav="設定")
 
 
 if __name__ == "__main__":
