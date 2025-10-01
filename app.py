@@ -378,6 +378,235 @@ def ensure_schema_migrations(engine: Engine) -> None:
             law_revision_sync_logs_table.create(conn)
 
 
+def build_theme_css(theme: str) -> str:
+    if theme == "ダーク":
+        return """
+:root {
+    color-scheme: dark;
+    --takken-color-bg: #1c1c1e;
+    --takken-color-bg-sidebar: rgba(28, 28, 30, 0.92);
+    --takken-color-surface: rgba(44, 44, 46, 0.94);
+    --takken-color-surface-elevated: rgba(58, 58, 60, 0.94);
+    --takken-color-border: rgba(255, 255, 255, 0.08);
+    --takken-color-text: #f5f5f7;
+    --takken-color-text-secondary: rgba(235, 235, 245, 0.6);
+    --takken-color-text-tertiary: rgba(235, 235, 245, 0.38);
+    --takken-color-accent: #0a84ff;
+    --takken-color-accent-soft: rgba(10, 132, 255, 0.18);
+    --takken-color-positive: #30d158;
+    --takken-color-negative: #ff453a;
+    --takken-focus-ring: 0 0 0 3px rgba(10, 132, 255, 0.45);
+    --takken-shadow-strong: 0 24px 60px rgba(0, 0, 0, 0.55);
+    --takken-radius-large: 18px;
+}
+body {
+    background-color: var(--takken-color-bg);
+    color: var(--takken-color-text);
+    font-family: "SF Pro JP", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+    font-feature-settings: "palt";
+}
+[data-testid="stAppViewContainer"] {
+    background: var(--takken-color-bg);
+    color: var(--takken-color-text);
+}
+[data-testid="stAppViewContainer"] a {
+    color: var(--takken-color-accent);
+}
+[data-testid="stSidebar"] {
+    background: var(--takken-color-bg-sidebar);
+    color: var(--takken-color-text);
+    border-right: 1px solid var(--takken-color-border);
+    backdrop-filter: blur(24px);
+}
+[data-testid="stSidebar"] .stRadio label,
+[data-testid="stSidebar"] .stCheckbox label,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] p {
+    color: var(--takken-color-text-secondary);
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent;
+    border-radius: 999px;
+    color: var(--takken-color-text-tertiary);
+    border: 1px solid transparent;
+    transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    background: var(--takken-color-accent-soft);
+    color: var(--takken-color-text);
+    border-color: rgba(10, 132, 255, 0.4);
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: var(--takken-color-text);
+    border-color: rgba(10, 132, 255, 0.25);
+}
+.stMetric,
+.stAlert,
+.stDataFrame,
+.stTable,
+.stExpander,
+[data-testid="stMarkdownContainer"] {
+    background: var(--takken-color-surface);
+    border-radius: var(--takken-radius-large);
+    border: 1px solid var(--takken-color-border);
+    box-shadow: var(--takken-shadow-strong);
+}
+.stExpander > div:first-child {
+    background: transparent;
+    color: var(--takken-color-text);
+}
+.element-container > .stMetric,
+.element-container > .stAlert {
+    padding: 1.1rem 1.2rem;
+}
+.home-dropzone-card {
+    background: rgba(10, 132, 255, 0.12);
+    border: 1px solid rgba(10, 132, 255, 0.48);
+    box-shadow: 0 22px 60px rgba(10, 132, 255, 0.25);
+}
+.home-data-card {
+    background: var(--takken-color-surface);
+    border: 1px solid var(--takken-color-border);
+    box-shadow: var(--takken-shadow-strong);
+}
+.takken-choice-button button,
+.stButton > button {
+    background: linear-gradient(135deg, #0a84ff 0%, #64d2ff 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 14px;
+    font-weight: 600;
+    box-shadow: 0 16px 40px rgba(10, 132, 255, 0.28);
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.3s ease;
+}
+.takken-choice-button button:hover,
+.stButton > button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 20px 48px rgba(10, 132, 255, 0.38);
+}
+.takken-choice-button button:focus,
+.stButton > button:focus {
+    outline: none;
+    box-shadow: var(--takken-focus-ring);
+}
+.takken-choice-button.is-correct button {
+    background: linear-gradient(135deg, #30d158 0%, #63e6b3 100%);
+    box-shadow: 0 18px 46px rgba(48, 209, 88, 0.32);
+}
+.takken-choice-button.is-incorrect button,
+.stButton > button.is-error {
+    background: linear-gradient(135deg, #ff453a 0%, #ff9f0a 100%);
+    box-shadow: 0 18px 46px rgba(255, 69, 58, 0.3);
+}
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="email"],
+textarea,
+select {
+    background: var(--takken-color-surface-elevated);
+    border: 1px solid var(--takken-color-border);
+    color: var(--takken-color-text);
+    border-radius: 14px;
+    padding: 0.55rem 0.9rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+input[type="text"]::placeholder,
+input[type="number"]::placeholder,
+input[type="password"]::placeholder,
+input[type="email"]::placeholder,
+textarea::placeholder {
+    color: var(--takken-color-text-tertiary);
+}
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="password"]:focus,
+input[type="email"]:focus,
+textarea:focus,
+select:focus {
+    outline: none;
+    border-color: var(--takken-color-accent);
+    box-shadow: var(--takken-focus-ring);
+}
+label, legend {
+    color: var(--takken-color-text-secondary);
+}
+code, pre {
+    background: rgba(44, 44, 46, 0.9);
+    color: var(--takken-color-text);
+    border-radius: 12px;
+    border: 1px solid var(--takken-color-border);
+}
+[data-testid="stDataFrame"] table,
+[data-testid="stTable"] table {
+    background: transparent;
+    color: var(--takken-color-text);
+}
+[data-testid="stDataFrame"] table thead th,
+[data-testid="stTable"] table thead th {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--takken-color-text-secondary);
+    font-weight: 600;
+}
+[data-testid="stDataFrame"] table tbody td,
+[data-testid="stTable"] table tbody td {
+    border-color: var(--takken-color-border);
+}
+.stProgress > div > div {
+    background: var(--takken-color-accent);
+}
+.stProgress > div {
+    background: rgba(10, 132, 255, 0.12);
+}
+.stSlider > div > div > div[data-baseweb="slider"] > div:first-child {
+    background: rgba(255, 255, 255, 0.08);
+}
+.stSlider > div > div > div[data-baseweb="slider"] > div:nth-child(2) {
+    background: var(--takken-color-accent);
+}
+.stSlider > div > div > div[data-baseweb="slider"] > div:nth-child(4) {
+    color: var(--takken-color-text-secondary);
+}
+.stMarkdown h1,
+.stMarkdown h2,
+.stMarkdown h3,
+.stMarkdown h4,
+.stMarkdown h5 {
+    color: var(--takken-color-text);
+    letter-spacing: 0.02em;
+}
+.stMarkdown p,
+.stMarkdown li {
+    color: var(--takken-color-text-secondary);
+}
+hr {
+    border-color: rgba(255, 255, 255, 0.08);
+}
+"""
+    if theme == "セピア":
+        return """
+[data-testid="stAppViewContainer"] {
+    background-color: #f3e9d2;
+    color: #4a3f35;
+}
+[data-testid="stSidebar"] {
+    background-color: #f9f1e0;
+}
+.stMetric, .stAlert {
+    background-color: rgba(74, 63, 53, 0.06);
+}
+"""
+    return """
+[data-testid="stAppViewContainer"] {
+    background-color: #f8fafc;
+    color: #1f2933;
+}
+[data-testid="stSidebar"] {
+    background-color: #ffffff;
+}
+"""
+
+
 def apply_user_preferences() -> None:
     settings = st.session_state.get("settings", {})
     theme = settings.get("theme", "セピア")
@@ -390,6 +619,9 @@ def apply_user_preferences() -> None:
 [data-testid="stAppViewContainer"] * {{
     font-size: calc(1rem * var(--takken-font-scale));
 }}
+body {{
+    font-family: "SF Pro JP", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+}}
 .takken-search-suggestions .stButton>button {{
     width: 100%;
     margin-bottom: 0.35rem;
@@ -398,42 +630,7 @@ def apply_user_preferences() -> None:
     border-color: #6366f1;
 }}
 """
-    if theme == "ダーク":
-        theme_css = """
-[data-testid="stAppViewContainer"] {
-    background-color: #0e1117;
-    color: #f4f7ff;
-}
-[data-testid="stSidebar"] {
-    background-color: #111827;
-}
-.stMetric, .stAlert {
-    background-color: rgba(255, 255, 255, 0.04);
-}
-"""
-    elif theme == "セピア":
-        theme_css = """
-[data-testid="stAppViewContainer"] {
-    background-color: #f3e9d2;
-    color: #4a3f35;
-}
-[data-testid="stSidebar"] {
-    background-color: #f9f1e0;
-}
-.stMetric, .stAlert {
-    background-color: rgba(74, 63, 53, 0.06);
-}
-"""
-    else:
-        theme_css = """
-[data-testid="stAppViewContainer"] {
-    background-color: #f8fafc;
-    color: #1f2933;
-}
-[data-testid="stSidebar"] {
-    background-color: #ffffff;
-}
-"""
+    theme_css = build_theme_css(theme)
     inject_style(base_css + theme_css, "takken-theme-styles")
 
 
