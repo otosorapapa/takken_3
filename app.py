@@ -35,6 +35,8 @@ REJECT_DIR = DATA_DIR / "rejects"
 OFFLINE_EXPORT_DIR = DATA_DIR / "offline_exports"
 MAPPING_KIND_QUESTIONS = "questions"
 MAPPING_KIND_ANSWERS = "answers"
+SCHEMA_GUIDE_PATH = Path("docs") / "data_schema.md"
+
 MAPPING_KIND_LABELS = {
     MAPPING_KIND_QUESTIONS: "設問データ",
     MAPPING_KIND_ANSWERS: "正答データ",
@@ -520,10 +522,16 @@ def get_template_archive() -> bytes:
         with pd.ExcelWriter(lr_excel, engine="openpyxl") as writer:
             law_revision_template.to_excel(writer, index=False, sheet_name="law_revision")
         zf.writestr("law_revision_template.xlsx", lr_excel.getvalue())
+        if SCHEMA_GUIDE_PATH.exists():
+            zf.writestr(
+                "data_schema.md",
+                SCHEMA_GUIDE_PATH.read_text(encoding="utf-8"),
+            )
         description = (
             "questions_template は設問データ、answers_template は正答データ、predicted_template は予想問題データ、"
             "law_revision_template は法改正予想問題データのサンプルです。\n"
-            "不要な行は削除し、ご自身のデータを入力してからアップロードしてください。"
+            "不要な行は削除し、ご自身のデータを入力してからアップロードしてください。\n"
+            "各列の詳細仕様は data_schema.md を参照してください。"
         )
         zf.writestr("README.txt", description)
     buffer.seek(0)
@@ -3711,6 +3719,12 @@ def render_data_io(db: DBManager) -> None:
         mime="application/zip",
     )
     st.caption("設問・正答データのCSV/XLSXテンプレートが含まれます。必要に応じて編集してご利用ください。")
+    if SCHEMA_GUIDE_PATH.exists():
+        st.markdown(
+            "📘 データ列の詳細仕様は下記のスキーマガイドで確認できます。テンプレート編集前にご覧ください。"
+        )
+        with st.expander("questions.csv / answers.csv / law_revision.csv のスキーマガイド"):
+            st.markdown(SCHEMA_GUIDE_PATH.read_text(encoding="utf-8"))
     sample_cols = st.columns(4)
     with sample_cols[0]:
         st.download_button(
