@@ -70,6 +70,64 @@ FONT_SIZE_SCALE = {
 }
 
 
+RESUME_MODE_LABELS = {
+    "full_exam": "本試験モード",
+    "adaptive": "適応学習",
+    "subject_drill": "分野別ドリル",
+    "year_drill": "年度別演習",
+    "weakness": "弱点分析",
+    "mock_exam": "模試",
+}
+
+
+ATTEMPT_MODE_TO_RESUME = {
+    "本試験モード": "full_exam",
+    "adaptive": "adaptive",
+    "subject_drill": "subject_drill",
+    "year_drill": "year_drill",
+    "弱点克服モード": "weakness",
+    "weakness": "weakness",
+    "模試": "mock_exam",
+}
+
+
+RESUME_MODE_ROUTING = {
+    "full_exam": {
+        "nav": "学習",
+        "primary_tab": "演習プラン",
+        "secondary_key": "learning_plan_tabs",
+        "secondary_tab": "本試験モード",
+    },
+    "adaptive": {
+        "nav": "学習",
+        "primary_tab": "演習プラン",
+        "secondary_key": "learning_plan_tabs",
+        "secondary_tab": "適応学習",
+    },
+    "subject_drill": {
+        "nav": "学習",
+        "primary_tab": "演習プラン",
+        "secondary_key": "learning_plan_tabs",
+        "secondary_tab": "分野別ドリル",
+    },
+    "year_drill": {
+        "nav": "学習",
+        "primary_tab": "演習プラン",
+        "secondary_key": "learning_plan_tabs",
+        "secondary_tab": "年度別演習",
+    },
+    "weakness": {
+        "nav": "学習",
+        "primary_tab": "弱点ケア",
+        "secondary_key": "learning_review_tabs",
+        "secondary_tab": "弱点分析",
+    },
+    "mock_exam": {
+        "nav": "模試",
+    },
+}
+
+
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO)
@@ -402,6 +460,30 @@ def with_rerun(callback: Callable[..., None], *args, **kwargs) -> Callable[[], N
         callback(*args, **kwargs)
 
     return _inner
+
+
+def consume_resume_mode(*expected_modes: str) -> Optional[Dict[str, object]]:
+    resume_mode = st.session_state.get("resume_mode")
+    if not resume_mode:
+        return None
+    if expected_modes and resume_mode not in expected_modes:
+        return None
+    context = st.session_state.pop("resume_context", {}) or {}
+    st.session_state.pop("resume_mode", None)
+    if isinstance(context, dict):
+        return context
+    return {}
+
+
+def trigger_resume(nav: str, resume_mode: str, context: Optional[Dict[str, object]] = None) -> None:
+    st.session_state["nav"] = nav
+    st.session_state["_nav_widget"] = nav
+    st.session_state["resume_mode"] = resume_mode
+    if context:
+        st.session_state["resume_context"] = context
+    else:
+        st.session_state.pop("resume_context", None)
+    safe_rerun()
 
 
 def handle_nav_change() -> None:
@@ -909,6 +991,183 @@ class DBManager:
                 conn,
             )
         return df
+
+    def get_recent_sessions(self, limit: int = 3) -> List[Dict[str, object]]:
+        if limit <= 0:
+            return []
+        entries: List[Dict[str, object]] = []
+        try:
+            with self.engine.connect() as conn:
+                attempt_summary_stmt = (
+                    select(
+                        attempts_table.c.mode.label("mode"),
+                        func.count().label("attempt_count"),
+                        func.sum(attempts_table.c.is_correct).label("correct_count"),
+                        func.max(attempts_table.c.created_at).label("last_attempt_at"),
+                    )
+                    .group_by(attempts_table.c.mode)
+                    .order_by(func.max(attempts_table.c.created_at).desc())
+                )
+                attempt_summary = pd.read_sql(attempt_summary_stmt, conn)
+                attempt_latest_stmt = text(
+                    """
+                    SELECT mode, question_id, exam_id, created_at
+                    FROM (
+                        SELECT
+                            id,
+                            mode,
+                            question_id,
+                            exam_id,
+                            created_at,
+                            ROW_NUMBER() OVER (PARTITION BY mode ORDER BY created_at DESC, id DESC) AS rn
+                        FROM attempts
+                    )
+                    WHERE rn = 1
+                    """
+                )
+                attempt_latest = pd.read_sql(attempt_latest_stmt, conn)
+                attempts = attempt_summary.merge(attempt_latest, on="mode", how="left")
+                question_meta: Dict[str, Dict[str, object]] = {}
+                question_ids = [
+                    str(qid)
+                    for qid in attempts.get("question_id", pd.Series(dtype="object"))
+                    if pd.notna(qid)
+                ]
+                if question_ids:
+                    question_stmt = (
+                        select(
+                            questions_table.c.id,
+                            questions_table.c.year,
+                            questions_table.c.q_no,
+                            questions_table.c.category,
+                        )
+                        .where(questions_table.c.id.in_(list(dict.fromkeys(question_ids))))
+                    )
+                    question_df = pd.read_sql(question_stmt, conn)
+                    for _, row in question_df.iterrows():
+                        question_meta[str(row["id"])] = row.to_dict()
+                attempts = attempts.sort_values("last_attempt_at", ascending=False)
+                for _, row in attempts.iterrows():
+                    mode_value = row.get("mode")
+                    if pd.isna(mode_value):
+                        continue
+                    resume_mode = ATTEMPT_MODE_TO_RESUME.get(str(mode_value), str(mode_value))
+                    last_active_value = row.get("last_attempt_at")
+                    last_active = None
+                    if pd.notna(last_active_value):
+                        last_active = pd.to_datetime(last_active_value).to_pydatetime()
+                    attempt_count_value = row.get("attempt_count")
+                    if pd.isna(attempt_count_value):
+                        attempt_count = 0
+                    else:
+                        attempt_count = int(attempt_count_value)
+                    correct_count_value = row.get("correct_count")
+                    if pd.isna(correct_count_value):
+                        correct_count = 0
+                    else:
+                        correct_count = int(correct_count_value)
+                    accuracy = None
+                    if attempt_count > 0:
+                        accuracy = correct_count / attempt_count
+                    question_id = row.get("question_id")
+                    question_label = None
+                    question_year = None
+                    if pd.notna(question_id):
+                        meta = question_meta.get(str(question_id))
+                        if meta:
+                            year_value = meta.get("year")
+                            if pd.notna(year_value):
+                                try:
+                                    question_year = int(year_value)
+                                except (TypeError, ValueError):
+                                    question_year = str(year_value)
+                            q_no_value = meta.get("q_no")
+                            q_display: Optional[object] = None
+                            if pd.notna(q_no_value):
+                                try:
+                                    q_display = int(q_no_value)
+                                except (TypeError, ValueError):
+                                    q_display = str(q_no_value)
+                            category_value = meta.get("category")
+                            category_display = (
+                                str(category_value).strip()
+                                if category_value is not None and str(category_value).strip()
+                                else ""
+                            )
+                            if question_year is None and year_value is not None:
+                                question_year = year_value
+                            if question_year is not None and q_display is not None:
+                                question_label = f"{question_year}年 問{q_display}"
+                            elif question_year is not None:
+                                question_label = f"{question_year}年"
+                            elif q_display is not None:
+                                question_label = f"問{q_display}"
+                            if category_display and question_label:
+                                question_label = f"{question_label} ({category_display})"
+                    entries.append(
+                        {
+                            "type": "learning",
+                            "resume_mode": resume_mode,
+                            "source_mode": str(mode_value),
+                            "last_active": last_active,
+                            "attempt_count": attempt_count,
+                            "correct_count": correct_count,
+                            "accuracy": accuracy,
+                            "question_id": str(question_id) if pd.notna(question_id) else None,
+                            "last_question_label": question_label,
+                            "context": {
+                                "question_id": str(question_id) if pd.notna(question_id) else None,
+                                "exam_id": int(row.get("exam_id")) if pd.notna(row.get("exam_id")) else None,
+                                "year": question_year,
+                            },
+                        }
+                    )
+                exams_stmt = (
+                    select(
+                        exams_table.c.id,
+                        exams_table.c.name,
+                        exams_table.c.started_at,
+                        exams_table.c.finished_at,
+                        exams_table.c.year_mode,
+                        exams_table.c.score,
+                    )
+                    .order_by(func.coalesce(exams_table.c.finished_at, exams_table.c.started_at).desc())
+                    .limit(max(limit * 2, limit))
+                )
+                exams_df = pd.read_sql(exams_stmt, conn)
+                for _, row in exams_df.iterrows():
+                    last_active_value = row.get("finished_at") or row.get("started_at")
+                    if pd.isna(last_active_value):
+                        continue
+                    last_active = pd.to_datetime(last_active_value).to_pydatetime()
+                    name_value = str(row.get("name") or "")
+                    if "本試験モード" in name_value:
+                        resume_mode = "full_exam"
+                    elif "模試" in name_value:
+                        resume_mode = "mock_exam"
+                    else:
+                        resume_mode = "mock_exam"
+                    entries.append(
+                        {
+                            "type": "exam",
+                            "resume_mode": resume_mode,
+                            "last_active": last_active,
+                            "name": name_value or RESUME_MODE_LABELS.get(resume_mode, "模試"),
+                            "score": int(row.get("score")) if pd.notna(row.get("score")) else None,
+                            "year_mode": row.get("year_mode"),
+                            "context": {
+                                "exam_id": int(row.get("id")) if pd.notna(row.get("id")) else None,
+                                "year_mode": row.get("year_mode"),
+                            },
+                        }
+                    )
+        except OperationalError:
+            return []
+        if not entries:
+            return []
+        filtered = [entry for entry in entries if entry.get("last_active")]
+        filtered.sort(key=lambda item: item.get("last_active", dt.datetime.min), reverse=True)
+        return filtered[:limit]
 
     def get_due_srs(self) -> pd.DataFrame:
         today = dt.date.today()
@@ -2295,6 +2554,7 @@ def main() -> None:
 def render_home(db: DBManager, df: pd.DataFrame) -> None:
     st.title("ホーム")
     attempts = db.get_attempt_stats()
+    recent_sessions = db.get_recent_sessions(limit=3)
     st.markdown("### サマリー")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -2304,6 +2564,43 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
     with col3:
         coverage = attempts["year"].nunique() / max(df["year"].nunique(), 1) * 100 if not attempts.empty else 0
         st.metric("年度カバレッジ", f"{coverage:.0f}%")
+    if recent_sessions:
+        st.markdown("### 続きから再開")
+        cols = st.columns(len(recent_sessions))
+        for idx, (col, session_info) in enumerate(zip(cols, recent_sessions)):
+            resume_mode = session_info.get("resume_mode")
+            label = RESUME_MODE_LABELS.get(resume_mode, session_info.get("name", "学習モード"))
+            last_active = session_info.get("last_active")
+            raw_context = session_info.get("context") or {}
+            context = dict(raw_context) if isinstance(raw_context, dict) else {}
+            nav_target = RESUME_MODE_ROUTING.get(resume_mode, {}).get("nav", "学習")
+            with col:
+                st.markdown(f"#### {label}")
+                if last_active:
+                    st.caption(f"最終更新: {last_active:%Y-%m-%d %H:%M}")
+                if session_info.get("type") == "learning":
+                    attempt_count = session_info.get("attempt_count", 0)
+                    accuracy = session_info.get("accuracy")
+                    if session_info.get("last_question_label"):
+                        st.write(f"最新: {session_info['last_question_label']}")
+                    st.write(f"挑戦回数: {attempt_count} 回")
+                    accuracy_text = f"{accuracy * 100:.1f}%" if accuracy is not None else "--"
+                    st.write(f"正答率: {accuracy_text}")
+                elif session_info.get("type") == "exam":
+                    if session_info.get("year_mode"):
+                        st.write(f"出題方式: {session_info['year_mode']}")
+                    score = session_info.get("score")
+                    if score is not None:
+                        st.write(f"スコア: {score} 点")
+                if resume_mode:
+                    st.button(
+                        "再開",  # noqa: E131
+                        key=f"resume_session_{idx}",
+                        use_container_width=True,
+                        on_click=with_rerun(trigger_resume, nav_target, resume_mode, context),
+                    )
+                else:
+                    st.caption("このモードは再開に対応していません。")
     st.info("過去問データと解答データをアップロードして学習を開始しましょう。『設定 ＞ データ入出力』から取り込めます。")
     st.markdown("### 最近のインポート")
     with db.engine.connect() as conn:
@@ -2319,9 +2616,28 @@ def render_learning(db: DBManager, df: pd.DataFrame) -> None:
     if df.empty:
         st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
         return
-    primary_tabs = st.tabs(["演習プラン", "特別対策", "弱点ケア"])
+    resume_mode = st.session_state.get("resume_mode")
+    if "learning_primary_tabs" not in st.session_state:
+        st.session_state["learning_primary_tabs"] = "演習プラン"
+    if "learning_plan_tabs" not in st.session_state:
+        st.session_state["learning_plan_tabs"] = "本試験モード"
+    if "learning_special_tabs" not in st.session_state:
+        st.session_state["learning_special_tabs"] = "法改正対策"
+    if "learning_review_tabs" not in st.session_state:
+        st.session_state["learning_review_tabs"] = "弱点分析"
+    if resume_mode:
+        routing = RESUME_MODE_ROUTING.get(resume_mode)
+        if routing:
+            primary_target = routing.get("primary_tab")
+            if primary_target:
+                st.session_state["learning_primary_tabs"] = primary_target
+            secondary_key = routing.get("secondary_key")
+            secondary_tab = routing.get("secondary_tab")
+            if secondary_key and secondary_tab:
+                st.session_state[secondary_key] = secondary_tab
+    primary_tabs = st.tabs(["演習プラン", "特別対策", "弱点ケア"], key="learning_primary_tabs")
     with primary_tabs[0]:
-        plan_tabs = st.tabs(["本試験モード", "適応学習", "分野別ドリル", "年度別演習"])
+        plan_tabs = st.tabs(["本試験モード", "適応学習", "分野別ドリル", "年度別演習"], key="learning_plan_tabs")
         with plan_tabs[0]:
             render_full_exam_lane(db, df)
         with plan_tabs[1]:
@@ -2331,13 +2647,13 @@ def render_learning(db: DBManager, df: pd.DataFrame) -> None:
         with plan_tabs[3]:
             render_year_drill_lane(db, df)
     with primary_tabs[1]:
-        special_tabs = st.tabs(["法改正対策", "予想問題演習"])
+        special_tabs = st.tabs(["法改正対策", "予想問題演習"], key="learning_special_tabs")
         with special_tabs[0]:
             render_law_revision_lane(db, parent_nav="学習")
         with special_tabs[1]:
             render_predicted_lane(db, parent_nav="学習")
     with primary_tabs[2]:
-        review_tabs = st.tabs(["弱点分析", "SRS復習"])
+        review_tabs = st.tabs(["弱点分析", "SRS復習"], key="learning_review_tabs")
         with review_tabs[0]:
             render_weakness_lane(db, df)
         with review_tabs[1]:
@@ -2350,6 +2666,7 @@ def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
     if len(df) < 50:
         st.info("50問の出題には最低50問のデータが必要です。データを追加してください。")
         return
+    consume_resume_mode("full_exam")
     session: Optional[ExamSession] = st.session_state.get("exam_session")
     error_key = "_full_exam_error"
     error_message = st.session_state.pop(error_key, None)
@@ -2389,6 +2706,7 @@ def render_full_exam_lane(db: DBManager, df: pd.DataFrame) -> None:
 def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
     st.subheader("適応学習")
     st.caption("回答履歴から能力θを推定し、伸びしろの大きい難度を優先出題します。")
+    consume_resume_mode("adaptive")
     attempts = db.get_attempt_stats()
     if attempts.empty:
         st.info("学習履歴がまだありません。本試験モードやドリルで取り組んでみましょう。")
@@ -2470,6 +2788,7 @@ def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
 def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
     st.subheader("分野別ドリル")
     st.caption("民法・借地借家法・都市計画法・建築基準法・税・鑑定評価・宅建業法といったテーマをピンポイントで鍛えます。")
+    consume_resume_mode("subject_drill")
     with st.expander("出題条件", expanded=True):
         preset = st.selectbox(
             "クイックプリセット",
@@ -2556,10 +2875,18 @@ def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
 def render_year_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
     st.subheader("年度別演習")
     st.caption("年度ごとの出題を通し演習し、本試験本番と同じ流れで知識を定着させます。")
+    resume_context = consume_resume_mode("year_drill")
     years = sorted(df["year"].unique(), reverse=True)
     if not years:
         st.info("年度情報が登録されていません。データを確認してください。")
         return
+    if resume_context:
+        year_value = resume_context.get("year")
+        if year_value is not None:
+            for candidate in years:
+                if str(candidate) == str(year_value):
+                    st.session_state["year_drill_year"] = candidate
+                    break
     selected_year = st.selectbox("年度", years, key="year_drill_year")
     subset = df[df["year"] == selected_year].sort_values("q_no")
     if subset.empty:
@@ -2601,6 +2928,7 @@ def render_year_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
 def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
     st.subheader("弱点克服モード")
     st.caption("誤答・低正答率・時間超過が目立つ問題を優先的に出題し、得点の底上げを図ります。")
+    consume_resume_mode("weakness")
     attempts = db.get_attempt_stats()
     if attempts.empty:
         st.info("学習履歴がまだありません。本試験モードやドリルで取り組んでみましょう。")
@@ -3828,17 +4156,26 @@ def render_mock_exam(db: DBManager, df: pd.DataFrame) -> None:
     if df.empty:
         st.warning("設問データがありません。")
         return
+    resume_context = consume_resume_mode("mock_exam")
+    if "mock_exam_year_mode" not in st.session_state:
+        st.session_state["mock_exam_year_mode"] = "最新年度"
+    if resume_context:
+        year_mode_value = resume_context.get("year_mode")
+        if year_mode_value:
+            st.session_state["mock_exam_year_mode"] = year_mode_value
     with st.form("mock_exam_form"):
         year_mode = st.selectbox(
             "出題方式",
             ["最新年度", "年度選択", "層化ランダム50"],
             help="最新年度の全問、任意年度のみ、または分野バランスを取った50問から選べます。",
+            key="mock_exam_year_mode",
         )
         if year_mode == "年度選択":
             selected_year = st.selectbox(
                 "年度",
                 sorted(df["year"].unique(), reverse=True),
                 help="模試に使用する年度を選択します。",
+                key="mock_exam_year",
             )
             subset = df[df["year"] == selected_year]
             questions = list(subset["id"])
