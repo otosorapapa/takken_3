@@ -2250,24 +2250,66 @@ def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
     if theta is None:
         st.info("推定に必要な難易度データが不足しています。問題に難易度を設定してください。")
         return
-    st.metric("推定能力θ", f"{theta:.2f}")
+    metric_col, help_col = st.columns([1, 2])
+    metric_col.metric("推定能力θ", f"{theta:.2f}")
+    help_col.caption(
+        "回答の正誤・難易度・最新の取り組み履歴を元に推定しています。"
+        " 新しい回答を記録するたびに自動で更新されます。"
+    )
     low_conf = int(st.session_state["settings"].get("review_low_confidence_threshold", 60))
     recommended = recommend_adaptive_questions(df, attempts, theta, low_conf_threshold=low_conf)
     if recommended.empty:
         st.info("おすすめできる問題がありません。条件を見直すか、新しい問題を追加してください。")
         return
-    st.markdown("#### 推奨問題リスト (上位10件)")
-    display = recommended[["id", "year", "q_no", "category", "difficulty", "priority"]].rename(
-        columns={
-            "id": "問題ID",
-            "year": "年度",
-            "q_no": "問番",
-            "category": "分野",
-            "difficulty": "難易度",
-            "priority": "推奨度",
-        }
-    )
-    st.dataframe(display.set_index("問題ID"), use_container_width=True)
+    st.markdown("#### 推奨問題 (上位10件)")
+    recommended_ids = recommended["id"].tolist()
+    session_key = "adaptive_question_select"
+    if not recommended_ids:
+        st.warning("推奨問題の一覧を表示できませんでした。")
+        return
+    if session_key not in st.session_state or st.session_state[session_key] not in recommended_ids:
+        st.session_state[session_key] = recommended_ids[0]
+    selected_id = st.session_state[session_key]
+
+    def select_adaptive_question(question_id: str) -> None:
+        st.session_state[session_key] = question_id
+
+    for _, rec in recommended.iterrows():
+        qid = rec["id"]
+        label = format_question_label(df, qid)
+        difficulty_value = rec.get("difficulty")
+        if pd.isna(difficulty_value):
+            difficulty_display = "不明"
+        elif isinstance(difficulty_value, (int, np.integer)):
+            difficulty_display = str(int(difficulty_value))
+        else:
+            difficulty_display = f"{float(difficulty_value):.1f}"
+        priority_value = rec.get("priority")
+        priority_display = f"{priority_value:.2f}" if pd.notna(priority_value) else "N/A"
+        button_label = f"{label}｜推奨度 {priority_display}｜難易度 {difficulty_display}"
+        button_type = "primary" if qid == selected_id else "secondary"
+        if st.button(
+            button_label,
+            key=f"adaptive_jump_{qid}",
+            type=button_type,
+            help="クリックすると下の詳細と出題画面がその問題に切り替わります。",
+        ):
+            select_adaptive_question(qid)
+            selected_id = qid
+
+    with st.expander("推奨問題の詳細一覧", expanded=False):
+        display = recommended[["id", "year", "q_no", "category", "difficulty", "priority"]].rename(
+            columns={
+                "id": "問題ID",
+                "year": "年度",
+                "q_no": "問番",
+                "category": "分野",
+                "difficulty": "難易度",
+                "priority": "推奨度",
+            }
+        )
+        st.dataframe(display.set_index("問題ID"), use_container_width=True)
+
     selected_id = st.selectbox(
         "取り組む問題",
         recommended["id"],
