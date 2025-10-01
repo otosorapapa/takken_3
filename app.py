@@ -3660,7 +3660,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
         st.error(f"学習履歴の整形に失敗しました ({exc})")
         st.info("CSVを直接編集した場合は、日付や秒数の列が数値・日時形式になっているか確認してください。")
         return
-    question_meta_cols = ["id", "question", "category", "topic", "tags", "difficulty"]
+    question_meta_cols = ["id", "question", "category", "topic", "tags", "difficulty", "year"]
     merged = attempts.merge(
         df[question_meta_cols],
         left_on="question_id",
@@ -3680,16 +3680,62 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
         st.warning("集計対象の設問が特定できませんでした。設問データが削除されていないか確認してください。")
         st.info("『設定 ＞ データ入出力』でquestions.csvを再度取り込み、設問IDと学習履歴の対応を復元できます。")
         return
-    accuracy_series = merged["is_correct"].dropna()
-    seconds_series = merged["seconds"].dropna()
-    confidence_series = merged["confidence"].dropna()
+    with st.expander("絞り込み", expanded=False):
+        filter_cols = st.columns(3)
+        category_options = sorted([c for c in merged["category"].dropna().unique()])
+        year_options_series = merged.get("year")
+        if year_options_series is not None:
+            year_numeric = pd.to_numeric(year_options_series, errors="coerce")
+            year_options = sorted({str(int(y)) for y in year_numeric.dropna().unique()}, reverse=True)
+        else:
+            year_options = []
+        difficulty_series_full = pd.to_numeric(merged.get("difficulty"), errors="coerce")
+        difficulty_options = sorted(difficulty_series_full.dropna().unique().tolist())
+        selected_categories = filter_cols[0].multiselect(
+            "分野",
+            options=category_options,
+            default=category_options,
+            help="分析に含める分野を選択します。",
+        )
+        selected_years = filter_cols[1].multiselect(
+            "年度",
+            options=year_options,
+            default=year_options,
+            help="学習履歴を集計する年度を選びます。",
+        )
+        selected_difficulties = filter_cols[2].multiselect(
+            "難易度",
+            options=difficulty_options,
+            default=difficulty_options,
+            help="対象とする難易度帯を選択します。",
+        )
+    filtered = merged.copy()
+    if selected_categories:
+        filtered = filtered[filtered["category"].isin(selected_categories)]
+    if selected_years:
+        year_series = filtered.get("year")
+        if year_series is not None:
+            year_numeric = pd.to_numeric(year_series, errors="coerce")
+            year_labels = year_numeric.apply(lambda x: str(int(x)) if pd.notna(x) else None)
+            filtered = filtered[year_labels.isin(selected_years)]
+        else:
+            filtered = filtered.iloc[0:0]
+    if selected_difficulties:
+        diff_series = pd.to_numeric(filtered.get("difficulty"), errors="coerce")
+        filtered = filtered[diff_series.isin(selected_difficulties)]
+    if filtered.empty:
+        st.info("データが不足しています")
+        return
+    accuracy_series = filtered["is_correct"].dropna()
+    seconds_series = filtered["seconds"].dropna()
+    confidence_series = filtered["confidence"].dropna()
     accuracy = accuracy_series.mean() if not accuracy_series.empty else np.nan
     avg_seconds = seconds_series.mean() if not seconds_series.empty else np.nan
     avg_confidence = confidence_series.mean() if not confidence_series.empty else np.nan
     st.subheader("サマリー")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("挑戦回数", f"{len(merged)} 回")
+        st.metric("挑戦回数", f"{len(filtered)} 回")
     with col2:
         accuracy_text = f"{accuracy * 100:.1f}%" if not np.isnan(accuracy) else "--"
         st.metric("平均正答率", accuracy_text)
@@ -3702,9 +3748,52 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
 
     import altair as alt
 
+    st.subheader("学習時間と挑戦回数の推移")
+    freq = st.selectbox("集計粒度", ["日次", "週次"], index=0, help="学習時間と挑戦回数の推移を集計する粒度を切り替えます。")
+    timeline = filtered.copy()
+    if freq == "週次":
+        timeline["period"] = timeline["created_at"].dt.to_period("W").dt.start_time
+    else:
+        timeline["period"] = timeline["created_at"].dt.normalize()
+    timeline_grouped = (
+        timeline.groupby("period")
+        .agg(
+            attempts_count=("is_correct", "count"),
+            total_seconds=("seconds", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"period": "date"})
+    )
+    timeline_grouped = timeline_grouped.sort_values("date")
+    timeline_grouped["学習時間 (分)"] = timeline_grouped["total_seconds"].fillna(0) / 60
+    timeline_grouped["挑戦回数"] = timeline_grouped["attempts_count"].fillna(0)
+    if timeline_grouped.empty:
+        st.info("データが不足しています")
+    else:
+        try:
+            time_base = alt.Chart(timeline_grouped).encode(
+                x=alt.X("date:T", title="日付"),
+                tooltip=[
+                    alt.Tooltip("date:T", title="日付"),
+                    alt.Tooltip("挑戦回数", format=","),
+                    alt.Tooltip("学習時間 (分)", format=".1f"),
+                ],
+            )
+            attempts_layer = time_base.mark_bar(opacity=0.5, color="#2563eb").encode(
+                y=alt.Y("挑戦回数:Q", title="挑戦回数")
+            )
+            minutes_layer = time_base.mark_line(point=True, color="#f97316").encode(
+                y=alt.Y("学習時間 (分):Q", title="学習時間 (分)", axis=alt.Axis(titleColor="#f97316"))
+            )
+            time_chart = alt.layer(attempts_layer, minutes_layer).resolve_scale(y="independent")
+            st.altair_chart(time_chart, use_container_width=True)
+        except Exception as exc:
+            st.warning(f"学習時間の推移グラフを表示できませんでした ({exc})")
+            st.caption("十分なデータが集まると自動で表示されます。")
+
     st.subheader("分野別分析")
     category_stats = (
-        merged.groupby("category")
+        filtered.groupby("category")
         .agg(
             accuracy=("is_correct", "mean"),
             avg_seconds=("seconds", "mean"),
@@ -3745,8 +3834,36 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             st.warning(f"分野別時間グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
 
+    st.subheader("正答率が低い論点")
+    topic_stats = (
+        filtered.dropna(subset=["topic"])
+        .groupby(["category", "topic"])
+        .agg(
+            accuracy=("is_correct", "mean"),
+            attempts_count=("is_correct", "count"),
+        )
+        .reset_index()
+    )
+    low_accuracy = (
+        topic_stats[topic_stats["attempts_count"] >= 3]
+        .sort_values("accuracy")
+        .head(10)
+        .copy()
+    )
+    if low_accuracy.empty:
+        st.info("十分なデータがありません。学習を重ねて傾向を確認しましょう。")
+    else:
+        low_accuracy["正答率"] = (low_accuracy["accuracy"] * 100).round(1)
+        display_cols = low_accuracy[["category", "topic", "attempts_count", "正答率"]]
+        display_cols = display_cols.rename(columns={"category": "分野", "topic": "論点", "attempts_count": "挑戦回数"})
+        st.dataframe(display_cols, use_container_width=True)
+        if st.button("復習モードで重点復習", type="primary"):
+            st.session_state["nav"] = "弱点復習"
+            st.session_state["_nav_widget"] = "弱点復習"
+            safe_rerun()
+
     st.subheader("確信度と正答の相関")
-    valid_conf = merged.dropna(subset=["confidence"])
+    valid_conf = filtered.dropna(subset=["confidence"])
     if valid_conf.empty:
         st.info("確信度データがまだ十分ではありません。学習時にスライダーで自己評価してみましょう。")
     else:
@@ -3769,7 +3886,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             st.caption("十分なデータが集まると自動で表示されます。")
 
     st.subheader("ひっかけ語彙ヒートマップ")
-    heatmap_df = compute_tricky_vocab_heatmap(merged, df)
+    heatmap_df = compute_tricky_vocab_heatmap(filtered, df)
     if heatmap_df.empty:
         st.info("誤答語彙の十分なデータがありません。")
     else:
@@ -3793,7 +3910,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             st.caption("十分なデータが集まると自動で表示されます。")
 
     st.subheader("最も改善した論点")
-    improvement = compute_most_improved_topic(merged, df)
+    improvement = compute_most_improved_topic(filtered, df)
     if improvement:
         st.success(
             f"{improvement['topic']}：正答率が {(improvement['early'] * 100):.1f}% → {(improvement['late'] * 100):.1f}% (＋{improvement['delta'] * 100:.1f}ポイント)"
