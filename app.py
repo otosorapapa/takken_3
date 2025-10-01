@@ -3029,6 +3029,7 @@ def parse_external_attempt_logs(
 
 
 def register_keyboard_shortcuts(mapping: Dict[str, str]) -> None:
+    """Bind keyboard keys to click buttons/popovers such as "❓ ショートカット"."""
     if not mapping:
         return
     st_html(
@@ -4594,7 +4595,6 @@ def render_question_interaction(
     order_key = f"{key_prefix}_order_{row['id']}"
     explanation_key = f"{key_prefix}_explanation_{row['id']}"
     confidence_key = f"{key_prefix}_confidence_{row['id']}"
-    help_state_key = f"{key_prefix}_help_visible"
     if st.session_state.get(last_question_key) != row["id"]:
         st.session_state[last_question_key] = row["id"]
         st.session_state.pop(feedback_key, None)
@@ -4699,7 +4699,34 @@ def render_question_interaction(
                         selected_choice = actual_idx
                         safe_rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
-    st.caption("1〜4キーで選択肢を即答できます。E:解説 F:フラグ N/P:移動 H:ヘルプ R:SRSリセット")
+    show_explanation = st.session_state.get(explanation_key, False)
+    flagged = row["id"] in set(st.session_state.get("review_flags", []))
+    grade_label = "採点"
+    explanation_label = "解説を隠す" if show_explanation else "解説を表示"
+    flag_label = "フラグ解除" if flagged else "復習フラグ"
+    nav_prev_label = "前へ"
+    nav_next_label = "次へ"
+    shortcut_help_label = "❓ ショートカット"
+    shortcut_lines = [
+        "- 1〜4: 選択肢を選ぶ",
+        f"- E: {explanation_label}",
+        f"- F: {flag_label}",
+    ]
+    if enable_srs:
+        shortcut_lines.append("- R: SRSリセット")
+    if navigation:
+        shortcut_lines.append(f"- N/P: {nav_next_label}・{nav_prev_label}")
+    shortcut_lines.append(f"- H: {shortcut_help_label} を開閉")
+    caption_cols = st.columns([6, 1])
+    with caption_cols[0]:
+        st.caption("キーボードショートカットは「❓ ショートカット」から確認できます。Hキーでも開閉できます。")
+    with caption_cols[1]:
+        with st.popover(
+            shortcut_help_label,
+            key=f"{key_prefix}_shortcut_help_{row['id']}",
+            use_container_width=True,
+        ):
+            st.markdown("#### ショートカット一覧\n" + "\n".join(shortcut_lines))
     confidence_value = st.session_state.get(confidence_key)
     if confidence_value is None:
         confidence_value = 50
@@ -4712,16 +4739,9 @@ def render_question_interaction(
         value=confidence_value,
         key=confidence_key,
     )
-    show_explanation = st.session_state.get(explanation_key, False)
-    flagged = row["id"] in set(st.session_state.get("review_flags", []))
-    grade_label = "採点"
-    explanation_label = "解説を隠す" if show_explanation else "解説を表示"
-    flag_label = "フラグ解除" if flagged else "復習フラグ"
-    help_label = "ヘルプ"
     auto_advance_enabled = st.session_state["settings"].get("auto_advance", False)
     grade_clicked = False
     needs_rerun_after_grade = False
-    help_visible = st.session_state.get(help_state_key, False)
     action_buttons = [
         {
             "id": "grade",
@@ -4738,11 +4758,6 @@ def render_question_interaction(
             "id": "flag",
             "label": flag_label,
             "key": f"{key_prefix}_flag_{row['id']}",
-        },
-        {
-            "id": "help",
-            "label": help_label,
-            "key": f"{key_prefix}_help_{row['id']}",
         },
     ]
     if enable_srs:
@@ -4776,9 +4791,6 @@ def render_question_interaction(
                 else:
                     flags.add(row["id"])
                 st.session_state["review_flags"] = list(flags)
-            elif action["id"] == "help" and clicked:
-                help_visible = not help_visible
-                st.session_state[help_state_key] = help_visible
             elif action["id"] == "srs_reset" and clicked and enable_srs:
                 db.upsert_srs(
                     row["id"],
@@ -4795,7 +4807,6 @@ def render_question_interaction(
             st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     flagged = row["id"] in set(st.session_state.get("review_flags", []))
-    help_visible = st.session_state.get(help_state_key, help_visible)
     if auto_advance_enabled and navigation and navigation.has_next:
         st.caption("採点後0.8秒で次問に自動遷移します。")
     if flagged:
@@ -4881,12 +4892,6 @@ def render_question_interaction(
     if show_explanation:
         st.markdown("#### 解説")
         render_explanation_content(row, db=db)
-    if help_visible:
-        st.info(
-            """ショートカット一覧\n- 1〜4: 選択肢を選ぶ\n- E: 解説の表示/非表示\n- F: 復習フラグの切り替え\n- N/P: 次へ・前へ\n- H: このヘルプ"""
-        )
-    nav_prev_label = "前へ"
-    nav_next_label = "次へ"
     if navigation:
         nav_cols = st.columns([1, 1, 2])
         prev_kwargs = {
@@ -4916,7 +4921,7 @@ def render_question_interaction(
         shortcut_map[str(idx + 1)] = label
     shortcut_map["e"] = explanation_label
     shortcut_map["f"] = flag_label
-    shortcut_map["h"] = help_label
+    shortcut_map["h"] = shortcut_help_label
     if enable_srs:
         shortcut_map["r"] = "SRSリセット"
     if navigation:
