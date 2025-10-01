@@ -1,6 +1,6 @@
 import datetime as dt
 import hashlib
-import html
+import html as html_module
 import io
 import json
 import logging
@@ -18,7 +18,7 @@ from urllib.parse import quote_plus
 import numpy as np
 import pandas as pd
 import streamlit as st
-from streamlit.components.v1 import html
+from streamlit.components.v1 import html as st_html
 from rapidfuzz import fuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -280,7 +280,7 @@ def inject_style(css: str, style_id: str) -> None:
         </script>
         """
     ).substitute(css=css_payload, style_id=style_id_payload)
-    html(script, height=0)
+    st_html(script, height=0)
 
 
 def ensure_schema_migrations(engine: Engine) -> None:
@@ -2101,7 +2101,7 @@ def compute_most_improved_topic(attempts: pd.DataFrame, df: pd.DataFrame) -> Opt
 def register_keyboard_shortcuts(mapping: Dict[str, str]) -> None:
     if not mapping:
         return
-    html(
+    st_html(
         """
         <script>
         (function() {
@@ -3618,7 +3618,7 @@ def render_question_interaction(
         (st.success if feedback["is_correct"] else st.error)(message)
         if explanation_summary:
             summary_html = (
-                f'<div class="takken-feedback-summary">💡 <span>{html.escape(explanation_summary)}</span></div>'
+                f'<div class="takken-feedback-summary">💡 <span>{html_module.escape(explanation_summary)}</span></div>'
             )
             st.markdown(summary_html, unsafe_allow_html=True)
         st.caption(
