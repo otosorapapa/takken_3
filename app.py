@@ -8,6 +8,7 @@ import random
 import re
 import time
 import traceback
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -1083,18 +1084,24 @@ class DBManager:
                 )
             for rec in records:
                 rec_id = rec.get("id")
-                if rec_id in existing_ids:
+                payload = {k: v for k, v in rec.items() if k != "id"}
+                if rec_id and rec_id in existing_ids:
                     conn.execute(
                         update(predicted_questions_table)
                         .where(predicted_questions_table.c.id == rec_id)
-                        .values(**{k: v for k, v in rec.items() if k != "id"})
+                        .values(**payload)
                     )
                     updated += 1
                 else:
-                    conn.execute(sa_insert(predicted_questions_table).values(**rec))
+                    if not rec_id:
+                        rec_id = str(uuid.uuid4())
+                    conn.execute(
+                        sa_insert(predicted_questions_table).values(
+                            id=rec_id, **payload
+                        )
+                    )
                     inserted += 1
-                    if rec_id:
-                        existing_ids.add(rec_id)
+                    existing_ids.add(rec_id)
         return inserted, updated
 
     def upsert_law_revision_questions(self, df: pd.DataFrame) -> Tuple[int, int]:
