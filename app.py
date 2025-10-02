@@ -1178,6 +1178,26 @@ class DBManager:
         inserted = 0
         updated = 0
         with self.engine.begin() as conn:
+            conn_inspector = inspect(conn)
+            predicted_columns = {
+                col["name"]
+                for col in conn_inspector.get_columns(predicted_questions_table.name)
+            }
+
+            if "review_status" not in predicted_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE predicted_questions "
+                        "ADD COLUMN review_status TEXT DEFAULT 'pending'"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE predicted_questions SET review_status = 'pending' "
+                        "WHERE review_status IS NULL"
+                    )
+                )
+
             existing_ids: Set[str] = set()
             if ids:
                 existing_ids = set(
