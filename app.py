@@ -109,7 +109,7 @@ CSV_IMPORT_TUTORIAL_URL = "https://takken.app/videos/csv-import-guide.mp4"
 CSV_IMPORT_GUIDE_POINTS = [
     "テンプレートZIPから questions.csv / answers.csv をダウンロードする",
     "年度・問番・問題文などの必須列を埋め、Excel などで保存する",
-    "『設定 ＞ データ入出力』またはホームのクイックインポートでファイルをアップロードする",
+    "『設定 ＞ データ入出力』でファイルをアップロードする",
     "バリデーション結果でエラー行を確認し、必要に応じて再修正する",
     "正常に取り込めたらTF-IDFの再学習や履歴エクスポートを活用する",
 ]
@@ -3219,7 +3219,7 @@ def store_uploaded_file(file: "UploadedFile", timestamp: str) -> Path:
 
 def init_session_state() -> None:
     defaults = {
-        "nav": "ホーム",
+        "nav": "学習",
         "current_question": None,
         "attempt_start": None,
         "exam_session": None,
@@ -3249,7 +3249,7 @@ def init_session_state() -> None:
                 },
             },
         },
-        "_nav_widget": "ホーム",
+        "_nav_widget": "学習",
         "integration_status": {
             "google_calendar": {
                 "last_synced": None,
@@ -3280,11 +3280,11 @@ def main() -> None:
     sidebar = st.sidebar
     sidebar.title("宅建10年ドリル")
     if st.session_state.get("_nav_widget") != st.session_state.get("nav"):
-        st.session_state["_nav_widget"] = st.session_state.get("nav", "ホーム")
-    menu_options = ["ホーム", "学習", "模試", "統計", "設定"]
-    current_nav = st.session_state.get("nav", "ホーム")
+        st.session_state["_nav_widget"] = st.session_state.get("nav", "学習")
+    menu_options = ["学習", "模試", "統計", "設定"]
+    current_nav = st.session_state.get("nav", menu_options[0])
     if current_nav not in menu_options:
-        current_nav = "ホーム"
+        current_nav = menu_options[0]
         st.session_state["nav"] = current_nav
         st.session_state["_nav_widget"] = current_nav
     sidebar.radio(
@@ -3294,13 +3294,12 @@ def main() -> None:
         key="_nav_widget",
         on_change=with_rerun(handle_nav_change),
     )
-    nav = st.session_state.get("nav", "ホーム")
+    nav = st.session_state.get("nav", menu_options[0])
     sidebar.divider()
     with sidebar.expander("モード別の使い方ガイド", expanded=False):
         st.markdown(
             "\n".join(
                 [
-                    "- **ホーム**：進捗サマリーと最近のインポート履歴を確認できます。",
                     "- **学習**：演習プラン・特別対策・弱点ケアのタブから目的に応じて学習モードを選択します。",
                     "- **模試**：年度や出題方式を指定して本番同様の模試を開始します。",
                     "- **統計**：分野別の成績や時間分析を把握できます。",
@@ -3309,9 +3308,7 @@ def main() -> None:
             )
         )
 
-    if nav == "ホーム":
-        render_home(db, df)
-    elif nav == "学習":
+    if nav == "学習":
         render_learning(db, df)
     elif nav == "模試":
         render_mock_exam(db, df)
@@ -3319,6 +3316,8 @@ def main() -> None:
         render_stats(db, df)
     elif nav == "設定":
         render_settings(db)
+    else:
+        render_learning(db, df)
 
 
 def render_home(db: DBManager, df: pd.DataFrame) -> None:
