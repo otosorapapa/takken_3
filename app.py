@@ -6682,10 +6682,18 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
         st.success("選択したデータを削除しました。")
 
     st.markdown("### (7) テンプレートダウンロード")
-    with open(DATA_DIR / "questions_sample.csv", "rb") as f:
-        st.download_button("設問テンプレCSV", f, file_name="questions_template.csv")
-    with open(DATA_DIR / "answers_sample.csv", "rb") as f:
-        st.download_button("解答テンプレCSV", f, file_name="answers_template.csv")
+    st.download_button(
+        "設問テンプレCSV",
+        build_sample_questions_csv(),
+        file_name="questions_template.csv",
+        mime="text/csv",
+    )
+    st.download_button(
+        "解答テンプレCSV",
+        build_sample_answers_csv(),
+        file_name="answers_template.csv",
+        mime="text/csv",
+    )
 
 
 def render_settings(db: DBManager) -> None:
