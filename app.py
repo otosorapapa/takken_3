@@ -4,6 +4,7 @@ import html as html_module
 import io
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -123,6 +124,29 @@ def build_csv_import_guide_markdown() -> str:
         f"{bullet_lines}\n\n"
         f"[動画で手順を確認する]({CSV_IMPORT_TUTORIAL_URL})"
     )
+
+
+def get_data_io_password() -> Optional[str]:
+    """Return the configured password for the data import/export area."""
+
+    secret_value: Optional[str]
+    try:
+        secret_value = st.secrets.get("DATA_IO_PASSWORD")  # type: ignore[attr-defined]
+    except Exception:
+        secret_value = None
+
+    def _normalize(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text if text else None
+
+    password = _normalize(secret_value)
+    if password:
+        return password
+
+    env_value = os.getenv("DATA_IO_PASSWORD")
+    return _normalize(env_value)
 
 
 logger = logging.getLogger(__name__)
@@ -6028,6 +6052,33 @@ def render_history_export_controls(
 def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     render_specialized_header(parent_nav, "データ入出力", "data_io")
     st.subheader("データ入出力")
+    password_input = st.text_input("データ入出力パスワード", type="password", key="data_io_password_input")
+    expected_password = get_data_io_password()
+    if not expected_password:
+        st.warning(
+            "データ入出力の管理パスワードが設定されていません。"
+            "Streamlit の secrets もしくは DATA_IO_PASSWORD 環境変数に値を設定してください。"
+        )
+        return
+
+    auth_key = "data_io_authenticated"
+    hash_key = "data_io_password_hash"
+    expected_hash = hashlib.sha256(expected_password.encode("utf-8")).hexdigest()
+    if st.session_state.get(hash_key) != expected_hash:
+        st.session_state[hash_key] = expected_hash
+        st.session_state[auth_key] = False
+
+    if not st.session_state.get(auth_key, False):
+        if not password_input:
+            st.warning("データ入出力パスワードを入力してください。")
+            return
+        if password_input != expected_password:
+            st.session_state["data_io_password_input"] = ""
+            st.warning("パスワードが正しくありません。")
+            return
+        st.session_state[auth_key] = True
+        st.session_state["data_io_password_input"] = ""
+
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     import_notifications = st.session_state.setdefault("import_notifications", [])
     if import_notifications:
