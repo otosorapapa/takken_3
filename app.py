@@ -947,6 +947,36 @@ class DBManager:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
+    @staticmethod
+    def _normalize_db_value(value: object) -> object:
+        if value is None:
+            return None
+        if value is pd.NA:
+            return None
+        if value is pd.NaT:
+            return None
+        if isinstance(value, pd.Timestamp):
+            if pd.isna(value):
+                return None
+            return value.to_pydatetime()
+        if isinstance(value, np.datetime64):
+            if np.isnat(value):
+                return None
+            return pd.Timestamp(value).to_pydatetime()
+        if isinstance(value, (np.integer, np.floating, np.bool_)):
+            return value.item()
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        if isinstance(value, (list, tuple, dict, set)):
+            return value
+        if pd.isna(value):
+            return None
+        return value
+
+    @classmethod
+    def _normalize_payload(cls, payload: Dict[str, object]) -> Dict[str, object]:
+        return {key: cls._normalize_db_value(value) for key, value in payload.items()}
+
     def load_dataframe(self, table: Table) -> pd.DataFrame:
         try:
             with self.engine.connect() as conn:
@@ -1033,7 +1063,9 @@ class DBManager:
                 for rec in batch:
                     rec_id = rec.get("id")
                     year_qno = (rec.get("year"), rec.get("q_no"))
-                    update_values = {k: v for k, v in rec.items() if k != "id"}
+                    update_values = self._normalize_payload(
+                        {k: v for k, v in rec.items() if k != "id"}
+                    )
 
                     if rec_id in existing_ids:
                         conn.execute(
@@ -1051,7 +1083,11 @@ class DBManager:
                         )
                         updated += 1
                     else:
-                        conn.execute(sa_insert(questions_table).values(**rec))
+                        conn.execute(
+                            sa_insert(questions_table).values(
+                                **self._normalize_payload(rec)
+                            )
+                        )
                         inserted += 1
                         if rec_id:
                             existing_ids.add(rec_id)
@@ -1084,7 +1120,9 @@ class DBManager:
                 )
             for rec in records:
                 rec_id = rec.get("id")
-                payload = {k: v for k, v in rec.items() if k != "id"}
+                payload = self._normalize_payload(
+                    {k: v for k, v in rec.items() if k != "id"}
+                )
                 if rec_id and rec_id in existing_ids:
                     conn.execute(
                         update(predicted_questions_table)
@@ -1121,7 +1159,9 @@ class DBManager:
                 )
             for rec in records:
                 rec_id = rec.get("id")
-                payload = {k: v for k, v in rec.items() if k != "id"}
+                payload = self._normalize_payload(
+                    {k: v for k, v in rec.items() if k != "id"}
+                )
                 if rec_id in existing_ids:
                     conn.execute(
                         update(law_revision_questions_table)
@@ -1130,7 +1170,11 @@ class DBManager:
                     )
                     updated += 1
                 else:
-                    conn.execute(sa_insert(law_revision_questions_table).values(**rec))
+                    conn.execute(
+                        sa_insert(law_revision_questions_table).values(
+                            **self._normalize_payload(rec)
+                        )
+                    )
                     inserted += 1
                     if rec_id:
                         existing_ids.add(rec_id)
@@ -1164,16 +1208,17 @@ class DBManager:
 
     def record_law_revision_sync(self, result: LawUpdateResult) -> None:
         with self.engine.begin() as conn:
-            conn.execute(
-                sa_insert(law_revision_sync_logs_table).values(
-                    source=result.source,
-                    fetched_at=result.fetched_at,
-                    status=result.status,
-                    message=result.message,
-                    revisions_detected=result.revisions_detected,
-                    questions_generated=result.questions_generated,
-                )
+            payload = self._normalize_payload(
+                {
+                    "source": result.source,
+                    "fetched_at": result.fetched_at,
+                    "status": result.status,
+                    "message": result.message,
+                    "revisions_detected": result.revisions_detected,
+                    "questions_generated": result.questions_generated,
+                }
             )
+            conn.execute(sa_insert(law_revision_sync_logs_table).values(**payload))
 
     def fetch_question(self, question_id: str) -> Optional[pd.Series]:
         with self.engine.connect() as conn:
@@ -1194,18 +1239,19 @@ class DBManager:
         grade: Optional[int] = None,
     ) -> None:
         with self.engine.begin() as conn:
-            conn.execute(
-                sa_insert(attempts_table).values(
-                    question_id=question_id,
-                    selected=selected,
-                    is_correct=int(is_correct),
-                    seconds=seconds,
-                    mode=mode,
-                    exam_id=exam_id,
-                    confidence=confidence,
-                    grade=grade,
-                )
+            payload = self._normalize_payload(
+                {
+                    "question_id": question_id,
+                    "selected": selected,
+                    "is_correct": int(is_correct),
+                    "seconds": seconds,
+                    "mode": mode,
+                    "exam_id": exam_id,
+                    "confidence": confidence,
+                    "grade": grade,
+                }
             )
+            conn.execute(sa_insert(attempts_table).values(**payload))
 
     def bulk_insert_attempts(self, attempts: Sequence[Dict[str, object]]) -> int:
         if not attempts:
@@ -1225,7 +1271,7 @@ class DBManager:
             created_at = item.get("created_at")
             if created_at is not None:
                 payload["created_at"] = created_at
-            payloads.append(payload)
+            payloads.append(self._normalize_payload(payload))
         with self.engine.begin() as conn:
             conn.execute(sa_insert(attempts_table), payloads)
         return len(payloads)
@@ -1242,7 +1288,9 @@ class DBManager:
 
     def log_exam_result(self, payload: Dict[str, object]) -> Optional[int]:
         with self.engine.begin() as conn:
-            result = conn.execute(sa_insert(exams_table).values(**payload))
+            result = conn.execute(
+                sa_insert(exams_table).values(**self._normalize_payload(payload))
+            )
             inserted = result.inserted_primary_key
         if inserted:
             return inserted[0]
@@ -1257,7 +1305,7 @@ class DBManager:
             conn.execute(
                 update(questions_table)
                 .where(questions_table.c.id == question_id)
-                .values(**fields)
+                .values(**self._normalize_payload(fields))
             )
 
     def get_attempt_stats(self) -> pd.DataFrame:
@@ -1388,7 +1436,9 @@ class DBManager:
 
     def upsert_srs(self, question_id: str, payload: Dict[str, Optional[str]]) -> None:
         with self.engine.begin() as conn:
-            stmt = sqlite_insert(srs_table).values(question_id=question_id, **payload)
+            stmt = sqlite_insert(srs_table).values(
+                question_id=question_id, **self._normalize_payload(payload)
+            )
             do_update = stmt.on_conflict_do_update(
                 index_elements=[srs_table.c.question_id],
                 set_={key: getattr(stmt.excluded, key) for key in payload},
@@ -1397,7 +1447,11 @@ class DBManager:
 
     def log_import(self, payload: Dict[str, Optional[str]]) -> None:
         with self.engine.begin() as conn:
-            conn.execute(sa_insert(import_logs_table).values(**payload))
+            conn.execute(
+                sa_insert(import_logs_table).values(
+                    **self._normalize_payload(payload)
+                )
+            )
 
     def save_mapping_profile(self, name: str, kind: str, mapping: Dict[str, str]) -> None:
         with self.engine.begin() as conn:
