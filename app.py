@@ -2554,6 +2554,42 @@ def inject_ui_styles() -> None:
 .takken-action-item {
     flex: 1 1 160px;
 }
+.takken-action-item .stButton button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    min-height: 48px;
+}
+.takken-action-item[data-action] .stButton button::before {
+    content: "";
+    display: inline-block;
+    width: 1.15rem;
+    height: 1.15rem;
+    background-color: currentColor;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    -webkit-mask-size: contain;
+    mask-repeat: no-repeat;
+    mask-position: center;
+    mask-size: contain;
+}
+.takken-action-item[data-action="grade"] .stButton button::before {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M12%202a10%2010%200%201%200%200%2020%2010%2010%200%200%200%200-20zm0%2018a8%208%200%201%201%200-16%208%208%200%200%201%200%2016zm-1.6-5.2-2.4-2.4%201.4-1.4%201%201%203.2-3.2%201.4%201.4-4.6%204.6z%22/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M12%202a10%2010%200%201%200%200%2020%2010%2010%200%200%200%200-20zm0%2018a8%208%200%201%201%200-16%208%208%200%200%201%200%2016zm-1.6-5.2-2.4-2.4%201.4-1.4%201%201%203.2-3.2%201.4%201.4-4.6%204.6z%22/%3E%3C/svg%3E");
+}
+.takken-action-item[data-action="toggle_explanation"] .stButton button::before {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M12%205C6.5%205%202%2012%202%2012s4.5%207%2010%207%2010-7%2010-7-4.5-7-10-7zm0%2012c-3.7%200-6.7-3.1-8.2-5%201.5-1.9%204.5-5%208.2-5%203.7%200%206.7%203.1%208.2%205-1.5%201.9-4.5%205-8.2%205zm0-8a3%203%200%201%200%200%206%203%203%200%200%200%200-6zm0%204a1%201%200%201%201%200-2%201%201%200%200%201%200%202z%22/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M12%205C6.5%205%202%2012%202%2012s4.5%207%2010%207%2010-7%2010-7-4.5-7-10-7zm0%2012c-3.7%200-6.7-3.1-8.2-5%201.5-1.9%204.5-5%208.2-5%203.7%200%206.7%203.1%208.2%205-1.5%201.9-4.5%205-8.2%205zm0-8a3%203%200%201%200%200%206%203%203%200%200%200%200-6zm0%204a1%201%200%201%201%200-2%201%201%200%200%201%200%202z%22/%3E%3C/svg%3E");
+}
+.takken-action-item[data-action="flag"] .stButton button::before {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M6%203h10l-1%204%201%204H6v8H4V3h2zm2%206h6.4l-.6-2%20.6-2H8v4z%22/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M6%203h10l-1%204%201%204H6v8H4V3h2zm2%206h6.4l-.6-2%20.6-2H8v4z%22/%3E%3C/svg%3E");
+}
+.takken-action-item[data-action="srs_reset"] .stButton button::before {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M12%204a8%208%200%200%201%207.4%205H22l-3.3%203.3L15.4%209h2.2A6%206%200%201%200%2018%2012h2a8%208%200%201%201-8-8zm0%2014a6%206%200%200%200%204.6-2.2l1.5%201.3A8%208%200%201%201%2012%204v2a6%206%200%201%200%200%2012z%22/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M12%204a8%208%200%200%201%207.4%205H22l-3.3%203.3L15.4%209h2.2A6%206%200%201%200%2018%2012h2a8%208%200%201%201-8-8zm0%2014a6%206%200%200%200%204.6-2.2l1.5%201.3A8%208%200%201%201%2012%204v2a6%206%200%201%200%200%2012z%22/%3E%3C/svg%3E");
+}
 @media (max-width: 768px) {
     .takken-choice-grid {
         grid-template-columns: 1fr;
@@ -5075,7 +5111,10 @@ def render_question_interaction(
     with st.container():
         st.markdown('<div class="takken-action-bar">', unsafe_allow_html=True)
         for action in action_buttons:
-            st.markdown('<div class="takken-action-item">', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="takken-action-item" data-action="{action["id"]}">',
+                unsafe_allow_html=True,
+            )
             button_kwargs = {
                 "key": action["key"],
                 "width": "stretch",
