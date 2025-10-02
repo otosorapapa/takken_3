@@ -977,6 +977,31 @@ class DBManager:
     def _normalize_payload(cls, payload: Dict[str, object]) -> Dict[str, object]:
         return {key: cls._normalize_db_value(value) for key, value in payload.items()}
 
+    @staticmethod
+    def _normalize_record_id(value: object) -> Optional[str]:
+        """Normalize record identifiers coming from user-provided data sources."""
+
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        if isinstance(value, (np.integer, int)):
+            return str(int(value))
+        if isinstance(value, (np.floating, float)):
+            if np.isnan(value):
+                return None
+            # Avoid trailing ``.0`` when the float represents an integer.
+            int_value = int(value)
+            if value == int_value:
+                return str(int_value)
+            return str(value)
+        if pd.isna(value):
+            return None
+        return str(value)
+
     def load_dataframe(self, table: Table) -> pd.DataFrame:
         try:
             with self.engine.connect() as conn:
@@ -1105,7 +1130,11 @@ class DBManager:
 
     def upsert_predicted_questions(self, df: pd.DataFrame) -> Tuple[int, int]:
         records = df.to_dict(orient="records")
-        ids = [rec["id"] for rec in records if "id" in rec]
+        ids = []
+        for rec in records:
+            normalized_id = self._normalize_record_id(rec.get("id"))
+            if normalized_id:
+                ids.append(normalized_id)
         inserted = 0
         updated = 0
         with self.engine.begin() as conn:
@@ -1119,7 +1148,7 @@ class DBManager:
                     ).scalars()
                 )
             for rec in records:
-                rec_id = rec.get("id")
+                rec_id = self._normalize_record_id(rec.get("id"))
                 payload = self._normalize_payload(
                     {k: v for k, v in rec.items() if k != "id"}
                 )
