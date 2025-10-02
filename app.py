@@ -6052,7 +6052,6 @@ def render_history_export_controls(
 def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     render_specialized_header(parent_nav, "データ入出力", "data_io")
     st.subheader("データ入出力")
-    password_input = st.text_input("データ入出力パスワード", type="password", key="data_io_password_input")
     expected_password = get_data_io_password()
     if not expected_password:
         st.warning(
@@ -6069,15 +6068,20 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
         st.session_state[auth_key] = False
 
     if not st.session_state.get(auth_key, False):
+        with st.form("data_io_password", clear_on_submit=True):
+            password_input = st.text_input("データ入出力パスワード", type="password", key="data_io_password_input")
+            submitted = st.form_submit_button("認証")
+
+        if not submitted:
+            st.warning("データ入出力パスワードを入力してください。")
+            return
         if not password_input:
             st.warning("データ入出力パスワードを入力してください。")
             return
         if password_input != expected_password:
-            st.session_state["data_io_password_input"] = ""
             st.warning("パスワードが正しくありません。")
             return
         st.session_state[auth_key] = True
-        st.session_state["data_io_password_input"] = ""
 
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     import_notifications = st.session_state.setdefault("import_notifications", [])
