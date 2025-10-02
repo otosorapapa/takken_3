@@ -6722,14 +6722,12 @@ def render_settings(db: DBManager) -> None:
             help="回答画面に経過時間を表示して本番同様の時間感覚を養います。",
         )
         sm2_key = "settings_sm2_initial_ease"
-        current_sm2 = settings.get("sm2_initial_ease", 2.5)
-        if st.session_state.get(sm2_key) != current_sm2:
-            st.session_state[sm2_key] = current_sm2
+        current_sm2 = float(settings.get("sm2_initial_ease", 2.5))
         settings["sm2_initial_ease"] = st.slider(
             "SM-2初期ease",
             min_value=1.3,
             max_value=3.0,
-            value=st.session_state[sm2_key],
+            value=current_sm2,
             help="間隔反復アルゴリズムの初期難易度です。既定値2.5で迷ったらそのままにしましょう。",
             key=sm2_key,
         )
@@ -6740,25 +6738,21 @@ def render_settings(db: DBManager) -> None:
         )
         low_conf_key = "settings_review_low_confidence_threshold"
         current_low_conf = int(settings.get("review_low_confidence_threshold", 60))
-        if st.session_state.get(low_conf_key) != current_low_conf:
-            st.session_state[low_conf_key] = current_low_conf
         settings["review_low_confidence_threshold"] = st.slider(
             "低確信として扱う確信度 (%)",
             min_value=0,
             max_value=100,
-            value=st.session_state[low_conf_key],
+            value=current_low_conf,
             help="自己評価の確信度がこの値未満なら復習対象に含めます。",
             key=low_conf_key,
         )
         elapsed_key = "settings_review_elapsed_days"
         current_elapsed = int(settings.get("review_elapsed_days", 7))
-        if st.session_state.get(elapsed_key) != current_elapsed:
-            st.session_state[elapsed_key] = current_elapsed
         settings["review_elapsed_days"] = st.slider(
             "復習抽出の経過日数しきい値",
             min_value=1,
             max_value=30,
-            value=st.session_state[elapsed_key],
+            value=current_elapsed,
             help="最終挑戦からこの日数が経過した問題を復習候補に追加します。",
             key=elapsed_key,
         )
