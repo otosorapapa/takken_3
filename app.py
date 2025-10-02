@@ -423,6 +423,37 @@ def ensure_schema_migrations(engine: Engine) -> None:
                         )
                     )
 
+        if "predicted_questions" in existing_tables:
+            predicted_columns = {
+                col["name"] for col in conn_inspector.get_columns("predicted_questions")
+            }
+            predicted_schema_updates = {
+                "auto_summary": "TEXT",
+                "auto_cloze": "TEXT",
+                "review_status": "TEXT DEFAULT 'pending'",
+                "reviewed_at": "DATETIME",
+                "generated_from": "TEXT",
+                "fetched_at": "DATETIME",
+                "created_at": "DATETIME DEFAULT (CURRENT_TIMESTAMP)",
+            }
+
+            for column_name, sql_type in predicted_schema_updates.items():
+                if column_name not in predicted_columns:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE predicted_questions ADD COLUMN {column_name} {sql_type}"
+                        )
+                    )
+                    predicted_columns.add(column_name)
+
+            if "review_status" in predicted_columns:
+                conn.execute(
+                    text(
+                        "UPDATE predicted_questions SET review_status = 'pending' "
+                        "WHERE review_status IS NULL"
+                    )
+                )
+
         if "law_revision_sync_logs" not in existing_tables:
             law_revision_sync_logs_table.create(conn)
 
