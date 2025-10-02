@@ -1069,9 +1069,19 @@ class DBManager:
         try:
             with self.engine.connect() as conn:
                 df = pd.read_sql(select(table), conn)
-        except OperationalError:
-            column_names = [column.name for column in table.columns]
-            return pd.DataFrame(columns=column_names)
+        except OperationalError as exc:
+            logger.warning(
+                "Load failed for %s due to %s. Running schema migrations and retrying.",
+                table.name,
+                exc,
+            )
+            ensure_schema_migrations(self.engine)
+            try:
+                with self.engine.connect() as conn:
+                    df = pd.read_sql(select(table), conn)
+            except OperationalError:
+                column_names = [column.name for column in table.columns]
+                return pd.DataFrame(columns=column_names)
         return df
 
     def load_predicted_questions(self) -> pd.DataFrame:
