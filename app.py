@@ -714,19 +714,43 @@ body {{
     inject_style(base_css + theme_css, "takken-theme-styles")
 
 
+_FORCE_RERUN_KEY = "_force_rerun_token"
+
+
 def safe_rerun() -> None:
+    """Request a rerun without breaking in-widget callbacks."""
+
+    st.session_state[_FORCE_RERUN_KEY] = uuid.uuid4().hex
+
+    if st.session_state.get("_in_callback"):
+        # Streamlit already reruns after callbacks when the session state changes.
+        # Calling ``st.rerun`` within the callback is a no-op and raises warnings,
+        # so we simply return after mutating the session state.
+        return
+
     rerun = getattr(st, "rerun", None)
     experimental_rerun = getattr(st, "experimental_rerun", None)
     if callable(rerun):
-        rerun()
+        try:
+            rerun()
+        except RuntimeError:
+            pass
     elif callable(experimental_rerun):
-        experimental_rerun()
+        try:
+            experimental_rerun()
+        except RuntimeError:
+            pass
 
 
 
 def with_rerun(callback: Callable[..., None], *args, **kwargs) -> Callable[[], None]:
     def _inner() -> None:
-        callback(*args, **kwargs)
+        st.session_state["_in_callback"] = True
+        try:
+            callback(*args, **kwargs)
+            safe_rerun()
+        finally:
+            st.session_state.pop("_in_callback", None)
 
     return _inner
 
@@ -767,7 +791,6 @@ def handle_nav_change() -> None:
 def navigate_to(section: str) -> None:
     st.session_state["nav"] = section
     st.session_state["_nav_widget"] = section
-    safe_rerun()
 
 
 def render_specialized_header(parent_label: str, current_label: str, key_suffix: str) -> None:
@@ -4002,7 +4025,6 @@ def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
             if queue_inner:
                 queue_inner.pop(0)
             st.session_state[queue_key] = queue_inner
-            safe_rerun()
 
         with st.expander("優先出題キュー", expanded=False):
             preview = prioritized.head(10)[["id", "priority_score", "accuracy"]]
@@ -4396,12 +4418,12 @@ def render_law_revision_lane(db: DBManager, parent_nav: str = "学習") -> None:
                 if st.button("選択した問題を承認", key="law_revision_approve"):
                     db.update_law_revision_review_status(review_selection, "approved")
                     st.success("承認しました。")
-                    st.experimental_rerun()
+                    safe_rerun()
             with col_b:
                 if st.button("選択した問題を差戻し", key="law_revision_reject"):
                     db.update_law_revision_review_status(review_selection, "rejected")
                     st.warning("差戻しました。")
-                    st.experimental_rerun()
+                    safe_rerun()
     with st.expander("法改正問題一覧", expanded=False):
         preview_cols = [
             "law_name",
