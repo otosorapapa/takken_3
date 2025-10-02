@@ -1662,20 +1662,30 @@ def normalize_predicted_questions(
             raise ValueError(f"必要な列が不足しています: {col}")
     for col in required_cols:
         df[col] = df[col].fillna("").astype(str)
-    df["label"] = df.get("label", "").fillna("").astype(str)
-    df["category"] = df.get("category", "").fillna("").astype(str)
-    df["topic"] = df.get("topic", "").fillna("").astype(str)
-    df["source"] = df.get("source", "").fillna("").astype(str)
-    df["year"] = df.get("year", "").fillna("").astype(str)
-    df["q_no"] = df.get("q_no", "").fillna("").astype(str)
-    df["explanation"] = df.get("explanation", "").fillna("").astype(str)
+
+    optional_str_cols = [
+        "label",
+        "category",
+        "topic",
+        "source",
+        "year",
+        "q_no",
+        "explanation",
+        "tags",
+    ]
+    for col in optional_str_cols:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("").astype(str)
+
+    raw_difficulty = df.get("difficulty")
+    if raw_difficulty is None:
+        raw_difficulty = pd.Series([DIFFICULTY_DEFAULT] * len(df), index=df.index)
     df["difficulty"] = (
-        df.get("difficulty")
+        pd.to_numeric(raw_difficulty, errors="coerce")
         .fillna(DIFFICULTY_DEFAULT)
-        .replace("", DIFFICULTY_DEFAULT)
         .astype(int)
     )
-    df["tags"] = df.get("tags", "").fillna("").astype(str)
     if "correct" in df.columns:
         df["correct"] = (
             pd.to_numeric(df["correct"], errors="coerce")
