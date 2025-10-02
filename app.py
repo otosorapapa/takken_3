@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 import textwrap
-from typing import (TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set,
-                    Tuple)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence,
+                    Set, Tuple)
 
 import numpy as np
 import pandas as pd
@@ -731,17 +731,26 @@ def with_rerun(callback: Callable[..., None], *args, **kwargs) -> Callable[[], N
     return _inner
 
 
+def _translate_width_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate deprecated ``use_container_width`` into ``width`` when present."""
+
+    translated = dict(kwargs)
+    if "use_container_width" in translated:
+        width_value = "stretch" if translated.pop("use_container_width") else "content"
+        translated.setdefault("width", width_value)
+    return translated
+
+
 def safe_popover(label: str, **kwargs):
     """Open a popover when available, otherwise fall back gracefully."""
 
+    popover_kwargs = _translate_width_kwargs(kwargs)
     popover = getattr(st, "popover", None)
     if callable(popover):
         try:
-            return popover(label, **kwargs)
+            return popover(label, **popover_kwargs)
         except TypeError:
-            filtered_kwargs = {
-                key: value for key, value in kwargs.items() if key != "use_container_width"
-            }
+            filtered_kwargs = {key: value for key, value in popover_kwargs.items() if key != "width"}
             try:
                 return popover(label, **filtered_kwargs)
             except TypeError:
@@ -770,7 +779,7 @@ def render_specialized_header(parent_label: str, current_label: str, key_suffix:
         st.button(
             "戻る",
             key=f"back_{key_suffix}",
-            use_container_width=True,
+            width="stretch",
             help=f"{parent_label}に戻ります。",
             on_click=with_rerun(navigate_to, parent_label),
         )
@@ -2928,7 +2937,7 @@ def render_explanation_content(row: pd.Series, db: Optional[DBManager] = None) -
         similar = compute_similarity(row["id"])
         if not similar.empty:
             st.markdown("#### 類似問題")
-            st.dataframe(similar, use_container_width=True)
+            st.dataframe(similar, width="stretch")
             questions_df = load_questions_df()
             similar_ids = [qid for qid in similar["id"] if pd.notna(qid)]
             if similar_ids:
@@ -3693,7 +3702,7 @@ def render_outline_notes_overview(db: DBManager, df: pd.DataFrame) -> None:
         "updated_at_display": "更新日時",
     }
     display_df = notes_df[list(display_columns.keys())].rename(columns=display_columns)
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(display_df, width="stretch")
     st.caption("学習履歴の取り組み回数を併記しています。ノートとログの整合を確認できます。")
     export_df = notes_df.copy()
     export_df["law_references"] = export_df["law_references"].apply(
@@ -3781,7 +3790,7 @@ def render_adaptive_lane(db: DBManager, df: pd.DataFrame) -> None:
                 "priority": "推奨度",
             }
         )
-        st.dataframe(display.set_index("問題ID"), use_container_width=True)
+        st.dataframe(display.set_index("問題ID"), width="stretch")
 
     selected_id = st.selectbox(
         "取り組む問題",
@@ -3933,7 +3942,7 @@ def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
                     "attempts_count": "挑戦回数",
                 }
             ).set_index("問題ID"),
-            use_container_width=True,
+            width="stretch",
         )
     if mode == "弱点優先":
         prioritized = filtered.sort_values(
@@ -3986,7 +3995,7 @@ def render_subject_drill_lane(db: DBManager, df: pd.DataFrame) -> None:
                         "accuracy": "正答率(%)",
                     }
                 ).set_index("問題ID"),
-                use_container_width=True,
+                width="stretch",
             )
         current_row = filtered[filtered["id"] == current_id].iloc[0]
         render_question_interaction(
@@ -4174,7 +4183,7 @@ def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
     display_df["正答率"] = display_df["正答率"].astype(float) * 100
     st.dataframe(
         display_df.set_index("問題ID"),
-        use_container_width=True,
+        width="stretch",
         column_config={
             "分野": st.column_config.TextColumn("分野", help="復習対象のカテゴリです。"),
             "年度": st.column_config.NumberColumn("年度", format="%d", help="最新年度をクリックでソートできます。"),
@@ -4249,7 +4258,7 @@ def render_law_revision_lane(db: DBManager, parent_nav: str = "学習") -> None:
             display["fetched_at"] = pd.to_datetime(display["fetched_at"]).dt.strftime("%Y-%m-%d %H:%M")
             st.dataframe(
                 display[["fetched_at", "source", "status", "revisions_detected", "questions_generated", "message"]],
-                use_container_width=True,
+                width="stretch",
             )
     with st.expander("出題条件", expanded=True):
         law_names = sorted(
@@ -4468,7 +4477,7 @@ def render_law_revision_lane(db: DBManager, parent_nav: str = "学習") -> None:
     with action_cols[0]:
         st.button(
             "前の問題",
-            use_container_width=True,
+            width="stretch",
             disabled=index <= 0,
             on_click=with_rerun(set_index, max(0, index - 1)),
             key="law_revision_prev_button",
@@ -4476,7 +4485,7 @@ def render_law_revision_lane(db: DBManager, parent_nav: str = "学習") -> None:
     with action_cols[1]:
         st.button(
             "次の問題",
-            use_container_width=True,
+            width="stretch",
             disabled=index >= total - 1,
             on_click=with_rerun(set_index, min(total - 1, index + 1)),
             key="law_revision_next_button",
@@ -4576,7 +4585,7 @@ def render_predicted_lane(db: DBManager, parent_nav: str = "学習") -> None:
         disabled = index <= 0
         st.button(
             "前の問題",
-            use_container_width=True,
+            width="stretch",
             disabled=disabled,
             on_click=with_rerun(set_index, max(0, index - 1)),
             key="predicted_prev_button",
@@ -4585,7 +4594,7 @@ def render_predicted_lane(db: DBManager, parent_nav: str = "学習") -> None:
         disabled = index >= total - 1
         st.button(
             "次の問題",
-            use_container_width=True,
+            width="stretch",
             disabled=disabled,
             on_click=with_rerun(set_index, min(total - 1, index + 1)),
             key="predicted_next_button",
@@ -4819,7 +4828,7 @@ def display_exam_result(result: Dict[str, object]) -> None:
                 .properties(width="container")
             )
             radar_chart = (chart + points).configure_view(strokeWidth=0)
-            st.altair_chart(radar_chart, use_container_width=True)
+            st.altair_chart(radar_chart, width="stretch")
     wrong_choices = result.get("wrong_choices", [])
     if wrong_choices:
         st.markdown("#### 誤答の代替正解肢傾向")
@@ -4829,7 +4838,7 @@ def display_exam_result(result: Dict[str, object]) -> None:
         wrong_df["正解肢"] = wrong_df["correct"].map({1: "①", 2: "②", 3: "③", 4: "④"})
         st.dataframe(
             wrong_df[["question", "category", "選択肢", "正解肢"]],
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -4944,7 +4953,7 @@ def render_question_interaction(
                 if st.button(
                     display_label or choice_labels[actual_idx],
                     key=button_key,
-                    use_container_width=True,
+                    width="stretch",
                     type=button_type,
                 ):
                     if not is_graded:
@@ -4977,7 +4986,7 @@ def render_question_interaction(
         with safe_popover(
             shortcut_help_label,
             key=f"{key_prefix}_shortcut_help_{row['id']}",
-            use_container_width=True,
+            width="stretch",
         ):
             st.markdown("#### ショートカット一覧\n" + "\n".join(shortcut_lines))
     confidence_value = st.session_state.get(confidence_key)
@@ -5027,7 +5036,7 @@ def render_question_interaction(
             st.markdown('<div class="takken-action-item">', unsafe_allow_html=True)
             button_kwargs = {
                 "key": action["key"],
-                "use_container_width": True,
+                "width": "stretch",
             }
             if "type" in action:
                 button_kwargs["type"] = action["type"]
@@ -5148,12 +5157,12 @@ def render_question_interaction(
     if navigation:
         nav_cols = st.columns([1, 1, 2])
         prev_kwargs = {
-            "use_container_width": True,
+            "width": "stretch",
             "disabled": not navigation.has_prev,
             "key": f"{key_prefix}_prev_{row['id']}",
         }
         next_kwargs = {
-            "use_container_width": True,
+            "width": "stretch",
             "disabled": not navigation.has_next,
             "key": f"{key_prefix}_next_{row['id']}",
         }
@@ -5562,7 +5571,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 .properties(width="container")
                 .configure_view(strokeWidth=0)
             )
-            st.altair_chart(time_chart, use_container_width=True)
+            st.altair_chart(time_chart, width="stretch")
         except Exception as exc:
             st.warning(f"学習時間の推移グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -5592,7 +5601,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 .properties(height=320, width="container")
                 .configure_view(strokeWidth=0)
             )
-            st.altair_chart(accuracy_chart, use_container_width=True)
+            st.altair_chart(accuracy_chart, width="stretch")
         except Exception as exc:
             st.warning(f"分野別正答率グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -5608,7 +5617,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 .properties(width="container")
                 .configure_view(strokeWidth=0)
             )
-            st.altair_chart(category_time_chart, use_container_width=True)
+            st.altair_chart(category_time_chart, width="stretch")
         except Exception as exc:
             st.warning(f"分野別時間グラフを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -5635,7 +5644,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
         low_accuracy["正答率"] = (low_accuracy["accuracy"] * 100).round(1)
         display_cols = low_accuracy[["category", "topic", "attempts_count", "正答率"]]
         display_cols = display_cols.rename(columns={"category": "分野", "topic": "論点", "attempts_count": "挑戦回数"})
-        st.dataframe(display_cols, use_container_width=True)
+        st.dataframe(display_cols, width="stretch")
         if st.button("復習モードで重点復習", type="primary"):
             st.session_state["nav"] = "弱点復習"
             st.session_state["_nav_widget"] = "弱点復習"
@@ -5661,7 +5670,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 .properties(width="container")
                 .configure_view(strokeWidth=0)
             )
-            st.altair_chart(scatter, use_container_width=True)
+            st.altair_chart(scatter, width="stretch")
         except Exception as exc:
             st.warning(f"相関散布図を表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -5687,7 +5696,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 .properties(width="container")
                 .configure_view(strokeWidth=0)
             )
-            st.altair_chart(heatmap, use_container_width=True)
+            st.altair_chart(heatmap, width="stretch")
         except Exception as exc:
             st.warning(f"語彙ヒートマップを表示できませんでした ({exc})")
             st.caption("十分なデータが集まると自動で表示されます。")
@@ -5947,7 +5956,7 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
                 "seconds": "処理秒数",
             }
         )
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
     st.markdown("### テンプレートファイル")
     st.download_button(
         "テンプレートをダウンロード (ZIP)",
@@ -6152,7 +6161,7 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
         history_df["fetched_at"] = pd.to_datetime(history_df["fetched_at"]).dt.strftime("%Y-%m-%d %H:%M")
         st.dataframe(
             history_df[["fetched_at", "source", "status", "revisions_detected", "questions_generated", "message"]],
-            use_container_width=True,
+            width="stretch",
         )
     render_quick_import_controls(
         db,
@@ -6202,7 +6211,7 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
                                     "correct",
                                 ]
                             ],
-                            use_container_width=True,
+                            width="stretch",
                         )
                         st.caption("取り込んだ予想問題の先頭10件を表示しています。")
     st.markdown("### 法改正予想問題インポート (law_revision.csv)")
@@ -6248,7 +6257,7 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
                         ]
                         st.dataframe(
                             normalized_law_revision.head(10)[preview_cols],
-                            use_container_width=True,
+                            width="stretch",
                         )
                         st.caption("取り込んだ法改正予想問題の先頭10件を表示しています。")
     st.markdown("### クイックエクスポート (questions.csv / answers.csv)")
