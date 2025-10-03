@@ -6061,7 +6061,8 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
             "Streamlit の secrets もしくは DATA_IO_PASSWORD 環境変数に値を設定してください。"
         )
         st.session_state.pop(hash_key, None)
-        st.session_state[auth_key] = True
+        st.session_state[auth_key] = False
+        st.stop()
     else:
         expected_hash = hashlib.sha256(expected_password.encode("utf-8")).hexdigest()
         if st.session_state.get(hash_key) != expected_hash:
