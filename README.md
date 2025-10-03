@@ -19,4 +19,6 @@ CSV取り込み手順の動画ガイドはこちら: [https://takken.app/videos/
 - Streamlit の secrets に `DATA_IO_PASSWORD = "your-password"` を追加する (`.streamlit/secrets.toml` など)。
 - サーバーの環境変数に `DATA_IO_PASSWORD` をセットする（例: `export DATA_IO_PASSWORD="your-password"`）。
 
+パスワードを設定しない場合は、アプリが既定値 `12211221` を使用します。運用環境では固有の値に変更してください。
+
 アプリ起動後、データ入出力画面の冒頭に表示されるパスワード入力欄に値を入力すると、認証されたセッションでのみダウンロード・インポート・リセット機能が利用できます。パスワードが未設定の場合は画面全体が無効化されるため、運用前に必ず設定してください。

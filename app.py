@@ -45,6 +45,7 @@ DB_PATH = DATA_DIR / "takken.db"
 UPLOAD_DIR = DATA_DIR / "uploads"
 REJECT_DIR = DATA_DIR / "rejects"
 OFFLINE_EXPORT_DIR = DATA_DIR / "offline_exports"
+DEFAULT_DATA_IO_PASSWORD = "12211221"
 MAPPING_KIND_QUESTIONS = "questions"
 MAPPING_KIND_ANSWERS = "answers"
 SCHEMA_GUIDE_PATH = Path("docs") / "data_schema.md"
@@ -146,7 +147,11 @@ def get_data_io_password() -> Optional[str]:
         return password
 
     env_value = os.getenv("DATA_IO_PASSWORD")
-    return _normalize(env_value)
+    password = _normalize(env_value)
+    if password:
+        return password
+
+    return DEFAULT_DATA_IO_PASSWORD
 
 
 logger = logging.getLogger(__name__)
