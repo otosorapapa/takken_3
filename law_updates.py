@@ -9,12 +9,16 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from app import DBManager
 
 
 def re_split(text: str) -> List[str]:
