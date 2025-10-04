@@ -12,6 +12,22 @@
 
 CSV取り込み手順の動画ガイドはこちら: [https://takken.app/videos/csv-import-guide.mp4](https://takken.app/videos/csv-import-guide.mp4)
 
+## 開発者向けチェック
+
+GitHub Actions の [CI ワークフロー](.github/workflows/ci.yml) は、以下の順序で品質チェックを実行します。
+
+1. `requirements.txt` の依存関係をインストール
+2. `ruff check .` による静的解析
+3. `pytest` によるユニットテスト
+
+同じ手順をローカルで再現する場合は、次のコマンドを実行してください。
+
+```bash
+pip install -r requirements.txt
+ruff check .
+pytest
+```
+
 ## データ入出力画面の管理パスワード設定
 
 設定 > データ入出力では、テンプレートのダウンロードや大量のデータ更新が可能なため、管理パスワードによる保護が必要です。以下のいずれかの方法で `DATA_IO_PASSWORD` を設定してください。

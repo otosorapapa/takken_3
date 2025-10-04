@@ -8,3 +8,5 @@ openpyxl
 rapidfuzz
 requests
 spacy
+pytest
+ruff
