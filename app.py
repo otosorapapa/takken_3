@@ -16,7 +16,7 @@ from pathlib import Path
 from string import Template
 import textwrap
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence,
-                    Set, Tuple)
+                    Set, Tuple, cast)
 
 import numpy as np
 import pandas as pd
@@ -3316,6 +3316,409 @@ def compute_most_improved_topic(attempts: pd.DataFrame, df: pd.DataFrame) -> Opt
     return best
 
 
+def compute_period_comparison(
+    attempts: pd.DataFrame, period_days: int = 7
+) -> Optional[Dict[str, object]]:
+    if "created_at" not in attempts.columns:
+        return None
+    working = attempts.dropna(subset=["created_at"]).copy()
+    if working.empty:
+        return None
+    working["created_at"] = pd.to_datetime(working["created_at"])
+    latest = working["created_at"].max()
+    if pd.isna(latest):
+        return None
+    recent_start = latest - pd.Timedelta(days=period_days)
+    prior_start = recent_start - pd.Timedelta(days=period_days)
+    prior_end = recent_start
+
+    def _metrics(df: pd.DataFrame) -> Dict[str, float]:
+        seconds = pd.to_numeric(df.get("seconds"), errors="coerce")
+        confidence = pd.to_numeric(df.get("confidence"), errors="coerce")
+        is_correct = pd.to_numeric(df.get("is_correct"), errors="coerce")
+        attempts_count = int(len(df))
+        metrics: Dict[str, float] = {
+            "attempts": attempts_count,
+            "accuracy": float(is_correct.mean()) if not is_correct.empty else np.nan,
+            "avg_seconds": float(seconds.mean()) if not seconds.dropna().empty else np.nan,
+            "avg_confidence": float(confidence.mean()) if not confidence.dropna().empty else np.nan,
+        }
+        metrics["attempts_per_day"] = (
+            metrics["attempts"] / float(period_days) if period_days else np.nan
+        )
+        return metrics
+
+    recent = working[working["created_at"] >= recent_start]
+    prior = working[(working["created_at"] >= prior_start) & (working["created_at"] < prior_end)]
+
+    recent_metrics = _metrics(recent)
+    prior_metrics = _metrics(prior)
+    deltas: Dict[str, float] = {}
+    for key in recent_metrics:
+        recent_value = recent_metrics.get(key)
+        prior_value = prior_metrics.get(key)
+        if recent_value is None or prior_value is None:
+            continue
+        if np.isnan(recent_value) or np.isnan(prior_value):
+            continue
+        deltas[key] = recent_value - prior_value
+
+    return {
+        "recent": recent_metrics,
+        "prior": prior_metrics,
+        "deltas": deltas,
+        "window_days": period_days,
+        "boundaries": {
+            "recent_start": recent_start,
+            "recent_end": latest,
+            "prior_start": prior_start,
+            "prior_end": prior_end,
+        },
+    }
+
+
+def compute_category_topic_deltas(
+    attempts: pd.DataFrame,
+    boundaries: Optional[Dict[str, pd.Timestamp]],
+    *,
+    min_attempts: int = 5,
+) -> Dict[str, pd.DataFrame]:
+    empty_result = {"category": pd.DataFrame(), "topic": pd.DataFrame()}
+    if not boundaries:
+        return empty_result
+    prior_start = boundaries.get("prior_start")
+    recent_start = boundaries.get("recent_start")
+    if prior_start is None or recent_start is None:
+        return empty_result
+    if "created_at" not in attempts.columns:
+        return empty_result
+
+    working = attempts.dropna(subset=["created_at"]).copy()
+    if working.empty:
+        return empty_result
+    working["created_at"] = pd.to_datetime(working["created_at"])
+    working = working[working["created_at"] >= prior_start]
+    if working.empty:
+        return empty_result
+    working["period"] = np.where(working["created_at"] >= recent_start, "recent", "prior")
+    working["is_correct_numeric"] = pd.to_numeric(working.get("is_correct"), errors="coerce")
+
+    def _aggregate(group_cols: List[str]) -> pd.DataFrame:
+        available_cols = [col for col in group_cols if col in working.columns]
+        if not available_cols:
+            return pd.DataFrame()
+        subset = working.dropna(subset=available_cols)
+        if subset.empty:
+            return pd.DataFrame()
+        grouped = (
+            subset.groupby(available_cols + ["period"])
+            .agg(
+                attempts=("question_id", "count"),
+                correct=("is_correct_numeric", "sum"),
+            )
+            .reset_index()
+        )
+        grouped["accuracy"] = grouped.apply(
+            lambda row: (row["correct"] / row["attempts"]) if row["attempts"] else np.nan,
+            axis=1,
+        )
+        recent_group = grouped[grouped["period"] == "recent"]
+        prior_group = grouped[grouped["period"] == "prior"]
+        merged = recent_group.merge(
+            prior_group, on=available_cols, how="outer", suffixes=("_recent", "_prior")
+        )
+        for col in ["attempts_recent", "attempts_prior", "correct_recent", "correct_prior"]:
+            if col in merged:
+                merged[col] = merged[col].fillna(0)
+        for col in ["accuracy_recent", "accuracy_prior"]:
+            if col in merged:
+                merged[col] = merged[col].astype(float)
+        merged["accuracy_delta"] = merged["accuracy_recent"] - merged["accuracy_prior"]
+        merged = merged[
+            (merged.get("attempts_recent", 0) + merged.get("attempts_prior", 0)) >= min_attempts
+        ]
+        if "category" in merged.columns:
+            merged["category"] = merged["category"].fillna("未分類")
+        if "topic" in merged.columns:
+            merged["topic"] = merged["topic"].fillna("未設定")
+        return merged.sort_values("accuracy_delta").reset_index(drop=True)
+
+    category_df = _aggregate(["category"])
+    topic_df = _aggregate(["category", "topic"])
+    return {"category": category_df, "topic": topic_df}
+
+
+def compute_difficulty_mix_delta(
+    attempts: pd.DataFrame,
+    boundaries: Optional[Dict[str, pd.Timestamp]],
+) -> pd.DataFrame:
+    if not boundaries:
+        return pd.DataFrame()
+    prior_start = boundaries.get("prior_start")
+    recent_start = boundaries.get("recent_start")
+    if prior_start is None or recent_start is None:
+        return pd.DataFrame()
+    if "difficulty" not in attempts.columns or "created_at" not in attempts.columns:
+        return pd.DataFrame()
+    working = attempts.dropna(subset=["created_at"]).copy()
+    if working.empty:
+        return pd.DataFrame()
+    working["created_at"] = pd.to_datetime(working["created_at"])
+    working = working[working["created_at"] >= prior_start]
+    if working.empty:
+        return pd.DataFrame()
+    working["difficulty_level"] = pd.to_numeric(working["difficulty"], errors="coerce")
+    working = working.dropna(subset=["difficulty_level"])
+    if working.empty:
+        return pd.DataFrame()
+    working["difficulty_level"] = working["difficulty_level"].round().astype(int)
+    working["period"] = np.where(working["created_at"] >= recent_start, "recent", "prior")
+    grouped = (
+        working.groupby(["difficulty_level", "period"])
+        .size()
+        .reset_index(name="count")
+    )
+    if grouped.empty:
+        return pd.DataFrame()
+    totals = grouped.groupby("period")["count"].sum().to_dict()
+    grouped["share"] = grouped.apply(
+        lambda row: (row["count"] / totals.get(row["period"], 0)) if totals.get(row["period"], 0) else np.nan,
+        axis=1,
+    )
+    recent = grouped[grouped["period"] == "recent"]
+    prior = grouped[grouped["period"] == "prior"]
+    merged = recent.merge(prior, on="difficulty_level", how="outer", suffixes=("_recent", "_prior"))
+    for col in ["count_recent", "count_prior"]:
+        if col in merged:
+            merged[col] = merged[col].fillna(0)
+    for col in ["share_recent", "share_prior"]:
+        if col in merged:
+            merged[col] = merged[col].astype(float)
+    merged["share_delta"] = merged["share_recent"] - merged["share_prior"]
+    merged = merged.sort_values(by="share_delta", key=lambda s: s.abs(), ascending=False)
+    return merged.reset_index(drop=True)
+
+
+def compute_pace_changes(
+    attempts: pd.DataFrame,
+    comparison: Optional[Dict[str, object]],
+) -> Optional[Dict[str, object]]:
+    if not comparison:
+        return None
+    boundaries = comparison.get("boundaries") if comparison else None
+    if not boundaries:
+        return None
+    prior_start = boundaries.get("prior_start")
+    recent_start = boundaries.get("recent_start")
+    if prior_start is None or recent_start is None:
+        return None
+    if "created_at" not in attempts.columns:
+        return None
+    working = attempts.dropna(subset=["created_at"]).copy()
+    if working.empty:
+        return None
+    working["created_at"] = pd.to_datetime(working["created_at"])
+    working = working[working["created_at"] >= prior_start]
+    if working.empty:
+        return None
+    working["period"] = np.where(working["created_at"] >= recent_start, "recent", "prior")
+    working["seconds_numeric"] = pd.to_numeric(working.get("seconds"), errors="coerce")
+    working["confidence_numeric"] = pd.to_numeric(working.get("confidence"), errors="coerce")
+
+    window_days = comparison.get("window_days", 7)
+
+    def _summarize(df: pd.DataFrame) -> Dict[str, float]:
+        seconds = df["seconds_numeric"].dropna()
+        confidence = df["confidence_numeric"].dropna()
+        attempts_count = int(len(df))
+        summary: Dict[str, float] = {
+            "attempts": attempts_count,
+            "attempts_per_day": (
+                attempts_count / float(window_days) if window_days else np.nan
+            ),
+            "avg_seconds": float(seconds.mean()) if not seconds.empty else np.nan,
+            "median_seconds": float(seconds.median()) if not seconds.empty else np.nan,
+            "avg_confidence": float(confidence.mean()) if not confidence.empty else np.nan,
+        }
+        return summary
+
+    recent = working[working["period"] == "recent"]
+    prior = working[working["period"] == "prior"]
+    recent_summary = _summarize(recent)
+    prior_summary = _summarize(prior)
+    deltas: Dict[str, float] = {}
+    for key in recent_summary:
+        recent_value = recent_summary.get(key)
+        prior_value = prior_summary.get(key)
+        if recent_value is None or prior_value is None:
+            continue
+        if np.isnan(recent_value) or np.isnan(prior_value):
+            continue
+        deltas[key] = recent_value - prior_value
+    return {
+        "recent": recent_summary,
+        "prior": prior_summary,
+        "deltas": deltas,
+        "window_days": window_days,
+    }
+
+
+def compute_practice_cadence(
+    attempts: pd.DataFrame, days: int = 21
+) -> Optional[Dict[str, object]]:
+    if "created_at" not in attempts.columns:
+        return None
+    working = attempts.dropna(subset=["created_at"]).copy()
+    if working.empty:
+        return None
+    working["created_at"] = pd.to_datetime(working["created_at"])
+    daily = working.groupby(working["created_at"].dt.normalize()).size()
+    if daily.empty:
+        return None
+    latest_date = daily.index.max()
+    if pd.isna(latest_date):
+        return None
+    start_date = latest_date - pd.Timedelta(days=days - 1)
+    date_range = pd.date_range(start_date, latest_date, freq="D")
+    daily = daily.reindex(date_range, fill_value=0)
+    result_df = daily.reset_index().rename(columns={"index": "date", 0: "attempts"})
+    counts = daily.to_numpy()
+    current_streak = 0
+    for value in reversed(counts):
+        if value > 0:
+            current_streak += 1
+        else:
+            break
+    max_streak = 0
+    running = 0
+    for value in counts:
+        if value > 0:
+            running += 1
+            max_streak = max(max_streak, running)
+        else:
+            running = 0
+    days_off = int((counts == 0).sum())
+    return {
+        "daily": result_df,
+        "current_streak": int(current_streak),
+        "max_streak": int(max_streak),
+        "days_off": days_off,
+    }
+
+
+def summarize_root_cause_anomalies(
+    comparison: Optional[Dict[str, object]],
+    category_trends: Dict[str, pd.DataFrame],
+    difficulty_mix: pd.DataFrame,
+    pace_changes: Optional[Dict[str, object]],
+    cadence: Optional[Dict[str, object]],
+    *,
+    max_items: int = 4,
+) -> List[str]:
+    findings: List[str] = []
+    if comparison:
+        window = comparison.get("window_days", 7)
+        accuracy_delta = comparison.get("deltas", {}).get("accuracy")
+        if accuracy_delta is not None and not np.isnan(accuracy_delta):
+            if accuracy_delta <= -0.05:
+                findings.append(
+                    f"直近{window}日で正答率が{abs(accuracy_delta) * 100:.1f}ポイント低下"
+                )
+            elif accuracy_delta >= 0.08:
+                findings.append(
+                    f"直近{window}日で正答率が{accuracy_delta * 100:.1f}ポイント改善"
+                )
+        attempts_delta = comparison.get("deltas", {}).get("attempts_per_day")
+        if attempts_delta is not None and not np.isnan(attempts_delta):
+            if attempts_delta <= -1:
+                findings.append(
+                    f"日次挑戦数が{abs(attempts_delta):.1f}問減少"
+                )
+            elif attempts_delta >= 1.5:
+                findings.append(
+                    f"日次挑戦数が{attempts_delta:.1f}問増加"
+                )
+
+    category_df = category_trends.get("category") if category_trends else None
+    if category_df is not None and not category_df.empty:
+        worst = category_df.nsmallest(1, "accuracy_delta")
+        if not worst.empty:
+            row = worst.iloc[0]
+            if row.get("accuracy_delta", 0) <= -0.08:
+                findings.append(
+                    f"{row.get('category', '未分類')}の正答率が{abs(row['accuracy_delta']) * 100:.1f}ポイント低下"
+                )
+        best = category_df.nlargest(1, "accuracy_delta")
+        if not best.empty:
+            row = best.iloc[0]
+            if row.get("accuracy_delta", 0) >= 0.1:
+                findings.append(
+                    f"{row.get('category', '未分類')}で正答率が{row['accuracy_delta'] * 100:.1f}ポイント改善"
+                )
+
+    if difficulty_mix is not None and not difficulty_mix.empty:
+        key_row = difficulty_mix.loc[difficulty_mix["share_delta"].abs().idxmax()]
+        delta = key_row.get("share_delta")
+        if delta is not None and not np.isnan(delta) and abs(delta) >= 0.15:
+            direction = "増加" if delta > 0 else "減少"
+            findings.append(
+                f"難易度{int(key_row.get('difficulty_level', 0))}の比率が{abs(delta) * 100:.1f}ポイント{direction}"
+            )
+
+    if pace_changes:
+        seconds_delta = pace_changes.get("deltas", {}).get("avg_seconds")
+        if seconds_delta is not None and not np.isnan(seconds_delta) and seconds_delta >= 5:
+            findings.append(f"平均解答時間が{seconds_delta:.1f}秒長くなっています")
+        confidence_delta = pace_changes.get("deltas", {}).get("avg_confidence")
+        if (
+            confidence_delta is not None
+            and not np.isnan(confidence_delta)
+            and confidence_delta <= -5
+        ):
+            findings.append(f"自己評価が{abs(confidence_delta):.1f}ポイント低下")
+
+    if cadence:
+        days_off = cadence.get("days_off")
+        if isinstance(days_off, (int, float)) and days_off >= 5:
+            findings.append(f"直近{len(cadence['daily'])}日で{int(days_off)}日が学習ゼロ")
+        current_streak = cadence.get("current_streak")
+        if isinstance(current_streak, (int, float)) and current_streak <= 2:
+            findings.append("直近の連続学習日数が2日以下")
+
+    unique_findings: List[str] = []
+    for finding in findings:
+        if finding not in unique_findings:
+            unique_findings.append(finding)
+        if len(unique_findings) >= max_items:
+            break
+    return unique_findings
+
+
+def build_root_cause_report(attempts: pd.DataFrame) -> Dict[str, object]:
+    comparison = compute_period_comparison(attempts)
+    if comparison:
+        boundaries = comparison.get("boundaries")
+        category_trends = compute_category_topic_deltas(attempts, boundaries)
+        difficulty_mix = compute_difficulty_mix_delta(attempts, boundaries)
+        pace_changes = compute_pace_changes(attempts, comparison)
+    else:
+        category_trends = {"category": pd.DataFrame(), "topic": pd.DataFrame()}
+        difficulty_mix = pd.DataFrame()
+        pace_changes = None
+    cadence = compute_practice_cadence(attempts)
+    anomalies = summarize_root_cause_anomalies(
+        comparison, category_trends, difficulty_mix, pace_changes, cadence
+    )
+    return {
+        "comparison": comparison,
+        "category_trends": category_trends,
+        "difficulty_mix": difficulty_mix,
+        "pace": pace_changes,
+        "cadence": cadence,
+        "anomalies": anomalies,
+    }
+
+
 def build_notion_summaries(attempts: pd.DataFrame, days: int = 7) -> List[Dict[str, object]]:
     if attempts.empty:
         return []
@@ -5734,13 +6137,38 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
     if filtered.empty:
         st.info("データが不足しています")
         return
+    analysis_key = "_stats_root_cause_report"
+    stored_report = st.session_state.get(analysis_key)
+    analysis_report: Optional[Dict[str, object]]
+    if isinstance(stored_report, dict):
+        analysis_report = cast(Dict[str, object], stored_report)
+    else:
+        analysis_report = None
+
     accuracy_series = filtered["is_correct"].dropna()
     seconds_series = filtered["seconds"].dropna()
     confidence_series = filtered["confidence"].dropna()
     accuracy = accuracy_series.mean() if not accuracy_series.empty else np.nan
     avg_seconds = seconds_series.mean() if not seconds_series.empty else np.nan
     avg_confidence = confidence_series.mean() if not confidence_series.empty else np.nan
-    st.subheader("サマリー")
+
+    header_cols = st.columns([0.7, 0.3])
+    with header_cols[0]:
+        st.subheader("サマリー")
+    with header_cols[1]:
+        analyze_clicked = st.button(
+            "原因分析",
+            type="primary",
+            help="期間比較や分野別の変化、難易度構成のズレを自動で抽出します。",
+            use_container_width=True,
+        )
+    if analyze_clicked:
+        analysis_report = build_root_cause_report(filtered)
+        st.session_state[analysis_key] = analysis_report
+    elif isinstance(analysis_report, dict):
+        analysis_report = build_root_cause_report(filtered)
+        st.session_state[analysis_key] = analysis_report
+
     accuracy_text = f"{accuracy * 100:.1f}%" if not np.isnan(accuracy) else "--"
     seconds_text = f"{avg_seconds:.1f} 秒" if not np.isnan(avg_seconds) else "--"
     confidence_text = f"{avg_confidence:.1f}%" if not np.isnan(avg_confidence) else "--"
@@ -5766,9 +6194,258 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             "caption": "自己評価スライダーの平均値",
         },
     ]
+    if isinstance(analysis_report, dict) and analysis_report.get("anomalies"):
+        preview_items = cast(List[str], analysis_report.get("anomalies", []))
+        preview_text = " / ".join(preview_items[:2])
+        summary_cards.append(
+            {
+                "title": "要注意ポイント",
+                "value": preview_text or "検出なし",
+                "caption": "詳細は下部の原因分析タブで確認できます。",
+            }
+        )
     render_app_card_grid(summary_cards)
 
     import altair as alt
+
+    if isinstance(analysis_report, dict):
+        report_dict = cast(Dict[str, object], analysis_report)
+        st.markdown("### 原因分析レポート")
+
+        def _format_pct(value: Optional[float]) -> str:
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                return "--"
+            return f"{float(value) * 100:.1f}%"
+
+        def _format_seconds(value: Optional[float]) -> str:
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                return "--"
+            return f"{float(value):.1f} 秒"
+
+        def _format_delta_pct(value: Optional[float]) -> Optional[str]:
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                return None
+            return f"{float(value) * 100:+.1f}pt"
+
+        def _format_delta(value: Optional[float], suffix: str = "") -> Optional[str]:
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                return None
+            return f"{float(value):+.1f}{suffix}"
+
+        def _format_number(value: Optional[float], suffix: str = "") -> str:
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                return "--"
+            return f"{float(value):.1f}{suffix}"
+
+        tabs = st.tabs(["期間比較", "分野・論点トレンド", "学習ペース", "演習リズム"])
+
+        comparison = report_dict.get("comparison")
+        difficulty_mix = report_dict.get("difficulty_mix")
+        with tabs[0]:
+            if not comparison:
+                st.info("比較に必要なデータが不足しています。")
+            else:
+                comparison = cast(Dict[str, object], comparison)
+                deltas = cast(Dict[str, float], comparison.get("deltas", {}))
+                recent = cast(Dict[str, float], comparison.get("recent", {}))
+                window_days = cast(int, comparison.get("window_days", 7))
+                boundaries = cast(Dict[str, pd.Timestamp], comparison.get("boundaries", {}))
+                recent_start = boundaries.get("recent_start")
+                recent_end = boundaries.get("recent_end")
+                prior_start = boundaries.get("prior_start")
+                prior_end = boundaries.get("prior_end")
+                period_caption_parts = []
+                if recent_start is not None and recent_end is not None:
+                    period_caption_parts.append(
+                        f"直近{window_days}日: {recent_start.date()}〜{recent_end.date()}"
+                    )
+                if prior_start is not None and prior_end is not None:
+                    period_caption_parts.append(
+                        f"比較対象: {prior_start.date()}〜{prior_end.date()}"
+                    )
+                if period_caption_parts:
+                    st.caption(" ｜ ".join(period_caption_parts))
+
+                metric_cols = st.columns(3)
+                metric_cols[0].metric(
+                    "正答率",
+                    _format_pct(recent.get("accuracy")),
+                    _format_delta_pct(deltas.get("accuracy")),
+                )
+                metric_cols[1].metric(
+                    "日次挑戦数",
+                    _format_number(recent.get("attempts_per_day"), " 回"),
+                    _format_delta(deltas.get("attempts_per_day"), " 回"),
+                )
+                metric_cols[2].metric(
+                    "平均解答時間",
+                    _format_seconds(recent.get("avg_seconds")),
+                    _format_delta(deltas.get("avg_seconds"), " 秒"),
+                )
+
+                if isinstance(difficulty_mix, pd.DataFrame) and not difficulty_mix.empty:
+                    mix_display = difficulty_mix.copy()
+                    mix_display = mix_display.fillna(np.nan)
+                    mix_display["recent_share_pct"] = (mix_display["share_recent"] * 100).round(1)
+                    mix_display["prior_share_pct"] = (mix_display["share_prior"] * 100).round(1)
+                    mix_display["share_delta_pct"] = (mix_display["share_delta"] * 100).round(1)
+                    mix_display = mix_display.rename(
+                        columns={
+                            "difficulty_level": "難易度",
+                            "recent_share_pct": "直近シェア (%)",
+                            "prior_share_pct": "前期間シェア (%)",
+                            "share_delta_pct": "変化量 (pt)",
+                            "count_recent": "直近挑戦数",
+                            "count_prior": "前期間挑戦数",
+                        }
+                    )
+                    st.dataframe(
+                        mix_display[
+                            [
+                                "難易度",
+                                "直近挑戦数",
+                                "前期間挑戦数",
+                                "直近シェア (%)",
+                                "前期間シェア (%)",
+                                "変化量 (pt)",
+                            ]
+                        ],
+                        width="stretch",
+                    )
+                else:
+                    st.caption("難易度別の比較対象データが不足しています。")
+
+        trends = report_dict.get("category_trends", {})
+        with tabs[1]:
+            category_df = trends.get("category") if isinstance(trends, dict) else None
+            topic_df = trends.get("topic") if isinstance(trends, dict) else None
+            with st.expander("分野別の変化", expanded=True):
+                if isinstance(category_df, pd.DataFrame) and not category_df.empty:
+                    display_df = category_df.copy()
+                    for col in ["accuracy_recent", "accuracy_prior", "accuracy_delta"]:
+                        if col in display_df:
+                            display_df[col] = (display_df[col] * 100).round(1)
+                    display_df = display_df.rename(
+                        columns={
+                            "category": "分野",
+                            "accuracy_recent": "直近正答率",
+                            "accuracy_prior": "前期間正答率",
+                            "accuracy_delta": "変化量",
+                            "attempts_recent": "直近挑戦数",
+                            "attempts_prior": "前期間挑戦数",
+                        }
+                    )
+                    st.dataframe(
+                        display_df[
+                            [
+                                "分野",
+                                "直近挑戦数",
+                                "前期間挑戦数",
+                                "直近正答率",
+                                "前期間正答率",
+                                "変化量",
+                            ]
+                        ],
+                        width="stretch",
+                    )
+                else:
+                    st.info("分野別の比較データがまだありません。")
+            with st.expander("論点別の変化", expanded=False):
+                if isinstance(topic_df, pd.DataFrame) and not topic_df.empty:
+                    display_df = topic_df.copy()
+                    for col in ["accuracy_recent", "accuracy_prior", "accuracy_delta"]:
+                        if col in display_df:
+                            display_df[col] = (display_df[col] * 100).round(1)
+                    display_df = display_df.rename(
+                        columns={
+                            "category": "分野",
+                            "topic": "論点",
+                            "accuracy_recent": "直近正答率",
+                            "accuracy_prior": "前期間正答率",
+                            "accuracy_delta": "変化量",
+                            "attempts_recent": "直近挑戦数",
+                            "attempts_prior": "前期間挑戦数",
+                        }
+                    )
+                    st.dataframe(
+                        display_df[
+                            [
+                                "分野",
+                                "論点",
+                                "直近挑戦数",
+                                "前期間挑戦数",
+                                "直近正答率",
+                                "前期間正答率",
+                                "変化量",
+                            ]
+                        ],
+                        width="stretch",
+                    )
+                else:
+                    st.info("論点レベルの比較データがまだありません。")
+
+        with tabs[2]:
+            pace_report = report_dict.get("pace")
+            if not pace_report:
+                st.info("学習ペースの比較に必要なデータが不足しています。")
+            else:
+                pace_report = cast(Dict[str, object], pace_report)
+                pace_recent = cast(Dict[str, float], pace_report.get("recent", {}))
+                pace_deltas = cast(Dict[str, float], pace_report.get("deltas", {}))
+                metric_cols = st.columns(3)
+                metric_cols[0].metric(
+                    "日次挑戦数",
+                    _format_number(pace_recent.get("attempts_per_day"), " 回"),
+                    _format_delta(pace_deltas.get("attempts_per_day"), " 回"),
+                )
+                metric_cols[1].metric(
+                    "中央値 (秒)",
+                    _format_seconds(pace_recent.get("median_seconds")),
+                    _format_delta(pace_deltas.get("median_seconds"), " 秒"),
+                )
+                metric_cols[2].metric(
+                    "平均自己評価",
+                    _format_number(pace_recent.get("avg_confidence"), " %"),
+                    _format_delta(pace_deltas.get("avg_confidence"), " %"),
+                )
+                st.caption("日次挑戦数は直近期間の平均値です。中央値は解答秒数の中央値を示します。")
+
+        with tabs[3]:
+            cadence_report = report_dict.get("cadence")
+            if not cadence_report:
+                st.info("演習リズムを可視化するデータがまだありません。")
+            else:
+                cadence_report = cast(Dict[str, object], cadence_report)
+                daily_df = cadence_report.get("daily")
+                if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                    cadence_display = daily_df.copy()
+                    if not pd.api.types.is_datetime64_any_dtype(cadence_display["date"]):
+                        cadence_display["date"] = pd.to_datetime(cadence_display["date"])
+                    cadence_display["date"] = cadence_display["date"].dt.date
+                    chart = (
+                        alt.Chart(cadence_display)
+                        .mark_bar(color="#2563eb")
+                        .encode(
+                            x=alt.X("date:T", title="日付"),
+                            y=alt.Y("attempts:Q", title="挑戦数"),
+                        )
+                        .properties(width="container")
+                        .configure_view(strokeWidth=0)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+                streak_cols = st.columns(3)
+                streak_cols[0].metric(
+                    "直近連続学習日数",
+                    str(int(cadence_report.get("current_streak", 0))),
+                )
+                streak_cols[1].metric(
+                    "最長連続学習日数",
+                    str(int(cadence_report.get("max_streak", 0))),
+                )
+                streak_cols[2].metric(
+                    "学習ゼロ日", str(int(cadence_report.get("days_off", 0))))
+                st.caption("棒グラフは直近数週間の挑戦回数です。ゼロ日の多さもチェックしましょう。")
+
 
     st.subheader("学習時間と挑戦回数の推移")
     freq = st.selectbox("集計粒度", ["日次", "週次"], index=0, help="学習時間と挑戦回数の推移を集計する粒度を切り替えます。")
