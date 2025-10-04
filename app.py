@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 import textwrap
@@ -5963,6 +5963,213 @@ def select_uploaded_file_by_name(
     return None
 
 
+@dataclass
+class QuickImportPreview:
+    questions_name: Optional[str] = None
+    answers_name: Optional[str] = None
+    questions_hash: Optional[str] = None
+    answers_hash: Optional[str] = None
+    normalized_questions: Optional[pd.DataFrame] = None
+    normalized_answers: Optional[pd.DataFrame] = None
+    merged_preview: Optional[pd.DataFrame] = None
+    normalized_questions_count: int = 0
+    normalized_answers_count: int = 0
+    merged_preview_count: int = 0
+    rejects_questions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    rejects_answers: pd.DataFrame = field(default_factory=pd.DataFrame)
+    conflicts: pd.DataFrame = field(default_factory=pd.DataFrame)
+    questions_without_answers: pd.DataFrame = field(default_factory=pd.DataFrame)
+    answers_without_questions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+
+    def has_errors(self) -> bool:
+        return bool(self.errors)
+
+    def has_mismatches(self) -> bool:
+        return (
+            not self.rejects_questions.empty
+            or not self.rejects_answers.empty
+            or not self.conflicts.empty
+            or not self.questions_without_answers.empty
+            or not self.answers_without_questions.empty
+        )
+
+    def matches_selection(
+        self,
+        questions_hash: Optional[str],
+        answers_hash: Optional[str],
+    ) -> bool:
+        return self.questions_hash == questions_hash and self.answers_hash == answers_hash
+
+
+def preview_quick_import(
+    db: DBManager,
+    questions_file: Optional["UploadedFile"],
+    answers_file: Optional["UploadedFile"],
+) -> QuickImportPreview:
+    preview = QuickImportPreview()
+
+    if questions_file is None and answers_file is None:
+        preview.errors.append("questions.csv か answers.csv のいずれかを選択してください。")
+        return preview
+
+    def _read_uploaded_csv(
+        file: "UploadedFile",
+        label: str,
+        *,
+        allow_cp932: bool = True,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+        data = file.getvalue()
+        digest = hashlib.md5(data).hexdigest()
+        try:
+            df = pd.read_csv(io.BytesIO(data))
+        except UnicodeDecodeError:
+            if not allow_cp932:
+                preview.errors.append(f"{label} をUTF-8で読み込めませんでした。Shift_JIS形式に変換して再度お試しください。")
+                return None, digest
+            try:
+                df = pd.read_csv(io.BytesIO(data), encoding="cp932")
+            except Exception as exc:  # pragma: no cover - defensive for pandas/encoding errors
+                preview.errors.append(f"{label} の読み込みに失敗しました: {exc}")
+                return None, digest
+        except pd.errors.EmptyDataError:
+            preview.errors.append(f"{label} が空です。テンプレートをもとにデータを記入してください。")
+            return None, digest
+        except pd.errors.ParserError as exc:
+            preview.errors.append(f"{label} の解析に失敗しました: {exc}")
+            return None, digest
+        except Exception as exc:  # pragma: no cover - unexpected read failures
+            preview.errors.append(f"{label} の読み込みで予期しないエラーが発生しました: {exc}")
+            return None, digest
+        return df, digest
+
+    questions_df: Optional[pd.DataFrame] = None
+    answers_df: Optional[pd.DataFrame] = None
+
+    if questions_file is not None:
+        preview.questions_name = questions_file.name
+        questions_df, preview.questions_hash = _read_uploaded_csv(questions_file, "questions.csv")
+        if questions_df is not None:
+            validation_errors = validate_question_records(questions_df)
+            if validation_errors:
+                preview.errors.extend(validation_errors)
+            else:
+                try:
+                    normalized_questions = normalize_questions(questions_df)
+                except Exception as exc:  # pragma: no cover - normalization guards
+                    preview.errors.append(f"questions.csv の整形に失敗しました: {exc}")
+                else:
+                    preview.normalized_questions = normalized_questions
+                    preview.normalized_questions_count = len(normalized_questions)
+        else:
+            preview.errors.append("questions.csv を読み込めませんでした。テンプレート形式を確認してください。")
+
+    if answers_file is not None:
+        preview.answers_name = answers_file.name
+        answers_df, preview.answers_hash = _read_uploaded_csv(answers_file, "answers.csv")
+        if answers_df is not None:
+            validation_errors = validate_answer_records(answers_df)
+            if validation_errors:
+                preview.errors.extend(validation_errors)
+            else:
+                try:
+                    normalized_answers = normalize_answers(answers_df)
+                except Exception as exc:  # pragma: no cover - normalization guards
+                    preview.errors.append(f"answers.csv の整形に失敗しました: {exc}")
+                else:
+                    preview.normalized_answers = normalized_answers
+                    preview.normalized_answers_count = len(normalized_answers)
+        else:
+            preview.errors.append("answers.csv を読み込めませんでした。テンプレート形式を確認してください。")
+
+    if preview.has_errors():
+        return preview
+
+    policy = {"explanation": "overwrite", "tags": "merge"}
+
+    if preview.normalized_questions is not None and preview.normalized_answers is not None:
+        try:
+            merged_df, rejects_q, rejects_a, conflicts = merge_questions_answers(
+                preview.normalized_questions,
+                preview.normalized_answers,
+                policy=policy,
+            )
+        except Exception as exc:  # pragma: no cover - merge safeguards
+            preview.errors.append(f"questions.csv と answers.csv の突合に失敗しました: {exc}")
+            return preview
+        preview.merged_preview = merged_df.head(50)
+        preview.merged_preview_count = len(merged_df)
+        preview.rejects_questions = rejects_q
+        preview.rejects_answers = rejects_a
+        preview.conflicts = conflicts
+
+        question_index = pd.MultiIndex.from_frame(
+            preview.normalized_questions[["year", "q_no"]]
+        )
+        answer_index = pd.MultiIndex.from_frame(preview.normalized_answers[["year", "q_no"]])
+        missing_answer_mask = ~question_index.isin(answer_index)
+        missing_question_mask = ~answer_index.isin(question_index)
+        if missing_answer_mask.any():
+            preview.questions_without_answers = preview.normalized_questions.loc[
+                missing_answer_mask, ["year", "q_no", "question"]
+            ]
+            preview.warnings.append(
+                f"{len(preview.questions_without_answers)} 件の設問に対応する answers.csv の行が見つかりませんでした。"
+            )
+        if missing_question_mask.any():
+            preview.answers_without_questions = preview.normalized_answers.loc[
+                missing_question_mask,
+                ["year", "q_no", "correct_number", "correct_label", "correct_text"],
+            ]
+            preview.warnings.append(
+                f"{len(preview.answers_without_questions)} 件の answers.csv の行に対応する設問が見つかりませんでした。"
+            )
+
+        if not rejects_q.empty:
+            preview.warnings.append(f"questions.csv の正規化で {len(rejects_q)} 件の行が除外されました。")
+        if not rejects_a.empty:
+            preview.warnings.append(f"answers.csv の突合で {len(rejects_a)} 件の行が除外されました。")
+        if not conflicts.empty:
+            preview.warnings.append(f"既存データとの正答不一致が {len(conflicts)} 件ありました。")
+    elif preview.normalized_questions is not None:
+        preview.merged_preview = preview.normalized_questions.head(50)
+        preview.merged_preview_count = preview.normalized_questions_count
+        preview.warnings.append("answers.csv が選択されていないため、正答の突合は行われません。")
+    elif preview.normalized_answers is not None:
+        preview.merged_preview = preview.normalized_answers.head(50)
+        preview.merged_preview_count = preview.normalized_answers_count
+        existing_questions = db.load_dataframe(questions_table)
+        if existing_questions.empty:
+            preview.warnings.append(
+                "answers.csv のみでは設問との突合が行えません。questions.csv も一緒にアップロードしてください。"
+            )
+        else:
+            try:
+                _, _, rejects_a, conflicts = merge_questions_answers(
+                    existing_questions,
+                    preview.normalized_answers,
+                    policy=policy,
+                )
+            except Exception:
+                # 既存データの読み込みに失敗した場合は警告のみに留める
+                preview.warnings.append("既存の設問データとの突合に失敗しました。answers.csv の形式を確認してください。")
+            else:
+                if not rejects_a.empty:
+                    preview.rejects_answers = rejects_a
+                    preview.warnings.append(
+                        f"既存設問と一致しなかった answers.csv の行が {len(rejects_a)} 件あります。"
+                    )
+                if not conflicts.empty:
+                    preview.conflicts = conflicts
+                    preview.warnings.append(
+                        f"既存データとの正答不一致が {len(conflicts)} 件ありました。"
+                    )
+
+    return preview
+
+
 def execute_quick_import(
     db: DBManager,
     questions_file: Optional["UploadedFile"],
@@ -6079,12 +6286,39 @@ def render_quick_import_controls(
 
     st.caption("questions.csv と answers.csv をまとめてドラッグ＆ドロップできます。必要な方だけでも取り込めます。")
 
+    sample_cols = st.columns(2)
+    with sample_cols[0]:
+        st.download_button(
+            "サンプル questions.csv をダウンロード",
+            data=build_sample_questions_csv(),
+            file_name="sample_questions.csv",
+            mime="text/csv",
+            help="正しい列構成のサンプルです。テンプレートとしてご利用ください。",
+        )
+    with sample_cols[1]:
+        st.download_button(
+            "サンプル answers.csv をダウンロード",
+            data=build_sample_answers_csv(),
+            file_name="sample_answers.csv",
+            mime="text/csv",
+            help="正答番号や解説の入力例です。questions.csv と併せてご確認ください。",
+        )
+    st.caption("テンプレートを確認してからアップロードすると、列構成の不一致を防げます。")
+
+    st.info(
+        "対応ファイル形式: CSV (UTF-8 / Shift_JIS)。1ファイルあたり最大200MBまでアップロードできます。"
+        " questions.csv と answers.csv を同時に選択すると整合性チェックをプレビューできます。"
+    )
+
     uploaded_files = st.file_uploader(
         "questions.csv / answers.csv をアップロード",
         type=["csv"],
         accept_multiple_files=True,
         key=f"{key_prefix}_quick_import_files",
-        help="複数ファイルを同時に選択すると自動で候補に入ります。",
+        help=(
+            "対応フォーマット: CSV (UTF-8 / Shift_JIS)。1ファイルあたり最大200MB。"
+            "複数ファイルを同時に選択すると自動で候補に入ります。"
+        ),
     )
 
     combined_files: List["UploadedFile"] = []
@@ -6142,8 +6376,122 @@ def render_quick_import_controls(
     selected_questions = resolve_selection(question_selection)
     selected_answers = resolve_selection(answer_selection)
 
-    if st.button("クイックインポート実行", key=f"{key_prefix}_quick_import_button"):
+    st.caption("『プレビューを実行』で整合性を確認してからインポートしてください。")
+
+    preview_state_key = f"{key_prefix}_quick_preview_state"
+    confirm_key = f"{key_prefix}_quick_preview_confirm"
+
+    preview_triggered = st.button(
+        "プレビューを実行",
+        key=f"{key_prefix}_quick_import_preview_button",
+    )
+
+    if preview_triggered:
+        with st.spinner("プレビューを生成しています..."):
+            preview_result = preview_quick_import(db, selected_questions, selected_answers)
+        st.session_state[preview_state_key] = preview_result
+        st.session_state[confirm_key] = False
+
+    preview_result: Optional[QuickImportPreview] = st.session_state.get(preview_state_key)
+
+    def _compute_file_hash(file: Optional["UploadedFile"]) -> Optional[str]:
+        if file is None:
+            return None
+        try:
+            data = file.getvalue()
+        except Exception:
+            return None
+        return hashlib.md5(data).hexdigest()
+
+    confirm_ready = False
+    preview_matches = False
+
+    if preview_result is not None:
+        st.markdown("#### クイックインポートのプレビュー")
+        if preview_result.has_errors():
+            for err in preview_result.errors:
+                st.error(err)
+            st.caption("エラーを修正してから再度プレビューを実行してください。")
+            st.session_state[confirm_key] = False
+        else:
+            if preview_result.warnings:
+                for warn in preview_result.warnings:
+                    st.warning(warn)
+
+            summary_lines: List[str] = []
+            if preview_result.normalized_questions is not None:
+                summary_lines.append(
+                    f"questions.csv: {preview_result.normalized_questions_count} 行"
+                )
+            if preview_result.normalized_answers is not None:
+                summary_lines.append(
+                    f"answers.csv: {preview_result.normalized_answers_count} 行"
+                )
+            if preview_result.merged_preview is not None and preview_result.merged_preview_count:
+                summary_lines.append(
+                    f"プレビュー表示: {preview_result.merged_preview_count} 行中の最大20行を表示"
+                )
+            if summary_lines:
+                st.caption("\n".join(f"• {line}" for line in summary_lines))
+
+            if preview_result.normalized_questions is not None:
+                st.markdown("**questions.csv 正規化結果 (先頭20行)**")
+                st.dataframe(preview_result.normalized_questions.head(20))
+            if preview_result.normalized_answers is not None:
+                st.markdown("**answers.csv 正規化結果 (先頭20行)**")
+                st.dataframe(preview_result.normalized_answers.head(20))
+            if (
+                preview_result.normalized_questions is not None
+                and preview_result.normalized_answers is not None
+                and preview_result.merged_preview is not None
+            ):
+                st.markdown("**統合後プレビュー (先頭20行)**")
+                st.dataframe(preview_result.merged_preview.head(20))
+
+            if not preview_result.questions_without_answers.empty:
+                with st.expander("answers.csv が不足している設問 (最大20件)"):
+                    st.dataframe(preview_result.questions_without_answers.head(20))
+            if not preview_result.answers_without_questions.empty:
+                with st.expander("questions.csv が不足している正答行 (最大20件)"):
+                    st.dataframe(preview_result.answers_without_questions.head(20))
+            if not preview_result.rejects_answers.empty or not preview_result.rejects_questions.empty:
+                with st.expander("正規化で除外された行 (最大20件)"):
+                    if not preview_result.rejects_questions.empty:
+                        st.markdown("**questions.csv**")
+                        st.dataframe(preview_result.rejects_questions.head(20))
+                    if not preview_result.rejects_answers.empty:
+                        st.markdown("**answers.csv**")
+                        st.dataframe(preview_result.rejects_answers.head(20))
+            if not preview_result.conflicts.empty:
+                with st.expander("既存データとの正答不一致 (最大20件)"):
+                    st.dataframe(preview_result.conflicts.head(20))
+
+            current_q_hash = _compute_file_hash(selected_questions)
+            current_a_hash = _compute_file_hash(selected_answers)
+            preview_matches = preview_result.matches_selection(current_q_hash, current_a_hash)
+            if not preview_matches:
+                st.session_state[confirm_key] = False
+                st.info("アップロードしたファイルがプレビューと異なります。ファイルを変更した場合は再度プレビューを実行してください。")
+            else:
+                confirm_ready = st.checkbox(
+                    "プレビューの内容を確認しました。上記の内容でインポートします。",
+                    key=confirm_key,
+                )
+
+    import_disabled = not (
+        preview_result
+        and not preview_result.has_errors()
+        and preview_matches
+        and confirm_ready
+    )
+
+    if st.button(
+        "クイックインポート実行",
+        key=f"{key_prefix}_quick_import_button",
+        disabled=import_disabled,
+    ):
         execute_quick_import(db, selected_questions, selected_answers)
+        st.session_state[confirm_key] = False
 
 
 def render_history_export_controls(
