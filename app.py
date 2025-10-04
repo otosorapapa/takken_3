@@ -39,6 +39,8 @@ from law_updates import (DEFAULT_LAW_SOURCES, LawRevisionAnalyzer,
 from integrations import (GoogleCalendarClient, GoogleCalendarConfig,
                           IntegrationConfigError, IntegrationError,
                           NotionClient, NotionConfig, OAuthCredentials)
+from translations import (DEFAULT_LANGUAGE, available_languages,
+                          get_current_language, set_current_language, t)
 
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "takken.db"
@@ -108,22 +110,35 @@ FONT_SIZE_SCALE = {
     "大きい": 1.2,
 }
 
+THEME_OPTION_LABELS = {
+    "ライト": "settings.theme.option.light",
+    "ダーク": "settings.theme.option.dark",
+    "セピア": "settings.theme.option.sepia",
+}
+
+FONT_SIZE_LABELS = {
+    "やや小さい": "settings.font_size.option.small",
+    "標準": "settings.font_size.option.standard",
+    "やや大きい": "settings.font_size.option.medium",
+    "大きい": "settings.font_size.option.large",
+}
+
 CSV_IMPORT_TUTORIAL_URL = "https://takken.app/videos/csv-import-guide.mp4"
-CSV_IMPORT_GUIDE_POINTS = [
-    "テンプレートZIPから questions.csv / answers.csv をダウンロードする",
-    "年度・問番・問題文などの必須列を埋め、Excel などで保存する",
-    "『設定 ＞ データ入出力』でファイルをアップロードする",
-    "バリデーション結果でエラー行を確認し、必要に応じて再修正する",
-    "正常に取り込めたらTF-IDFの再学習や履歴エクスポートを活用する",
+CSV_IMPORT_GUIDE_KEYS = [
+    "csv_import.guide.step1",
+    "csv_import.guide.step2",
+    "csv_import.guide.step3",
+    "csv_import.guide.step4",
+    "csv_import.guide.step5",
 ]
 
 
 def build_csv_import_guide_markdown() -> str:
-    bullet_lines = "\n".join(f"- {point}" for point in CSV_IMPORT_GUIDE_POINTS)
+    bullet_lines = "\n".join(f"- {t(key)}" for key in CSV_IMPORT_GUIDE_KEYS)
     return (
-        "**CSV取り込みの流れ**\n"
+        f"{t('csv_import.guide.title')}\n"
         f"{bullet_lines}\n\n"
-        f"[動画で手順を確認する]({CSV_IMPORT_TUTORIAL_URL})"
+        f"[{t('csv_import.guide.video')}]({CSV_IMPORT_TUTORIAL_URL})"
     )
 
 
@@ -3604,6 +3619,7 @@ def init_session_state() -> None:
         "attempt_start": None,
         "exam_session": None,
         "import_state": {},
+        "language": DEFAULT_LANGUAGE,
         "settings": {
             "shuffle_choices": True,
             "theme": "セピア",
@@ -3649,7 +3665,7 @@ def init_session_state() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="宅建10年ドリル", layout="wide")
+    st.set_page_config(page_title=t("app.title"), layout="wide")
     init_session_state()
     apply_user_preferences()
     engine = get_engine()
@@ -3658,32 +3674,39 @@ def main() -> None:
     df = load_questions_df()
 
     sidebar = st.sidebar
-    sidebar.title("宅建10年ドリル")
+    sidebar.title(t("app.title"))
     if st.session_state.get("_nav_widget") != st.session_state.get("nav"):
         st.session_state["_nav_widget"] = st.session_state.get("nav", "学習")
     menu_options = ["学習", "模試", "統計", "設定"]
+    menu_labels = {
+        "学習": "nav.learning",
+        "模試": "nav.mock_exam",
+        "統計": "nav.stats",
+        "設定": "nav.settings",
+    }
     current_nav = st.session_state.get("nav", menu_options[0])
     if current_nav not in menu_options:
         current_nav = menu_options[0]
         st.session_state["nav"] = current_nav
         st.session_state["_nav_widget"] = current_nav
     sidebar.radio(
-        "メニュー",
+        t("nav.menu"),
         menu_options,
         index=menu_options.index(current_nav),
         key="_nav_widget",
+        format_func=lambda value: t(menu_labels.get(value, value)),
         on_change=with_rerun(handle_nav_change),
     )
     nav = st.session_state.get("nav", menu_options[0])
     sidebar.divider()
-    with sidebar.expander("モード別の使い方ガイド", expanded=False):
+    with sidebar.expander(t("nav.guide.title"), expanded=False):
         st.markdown(
             "\n".join(
                 [
-                    "- **学習**：演習プラン・特別対策・弱点ケアのタブから目的に応じて学習モードを選択します。",
-                    "- **模試**：年度や出題方式を指定して本番同様の模試を開始します。",
-                    "- **統計**：分野別の成績や時間分析を把握できます。",
-                    "- **設定**：表示設定の調整と『設定 ＞ データ入出力』タブでのCSV/ZIP取り込みをまとめています。",
+                    t("nav.guide.learning"),
+                    t("nav.guide.mock"),
+                    t("nav.guide.stats"),
+                    t("nav.guide.settings"),
                 ]
             )
         )
@@ -3775,7 +3798,9 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
     ]
     render_app_card_grid(summary_cards)
 
-    guide_items = "".join(f"<li>{html_module.escape(point)}</li>" for point in CSV_IMPORT_GUIDE_POINTS)
+    guide_items = "".join(
+        f"<li>{html_module.escape(t(key))}</li>" for key in CSV_IMPORT_GUIDE_KEYS
+    )
     st.markdown(
         f"""
         <div class=\"home-data-card\">
@@ -3793,7 +3818,7 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
     render_quick_import_controls(
         db,
         key_prefix="home",
-        heading="#### クイックインポート (questions.csv / answers.csv)",
+        heading=t("quick_import.heading.home"),
         initial_files=dropzone_files or None,
     )
     render_history_export_controls(
@@ -5972,7 +5997,7 @@ def execute_quick_import(
     questions_df: Optional[pd.DataFrame] = None
     answers_df: Optional[pd.DataFrame] = None
     if questions_file is None and answers_file is None:
-        st.warning("questions.csv か answers.csv のいずれかを選択してください。")
+        st.warning(t("quick_import.prompt.select_file"))
         return
 
     if questions_file is not None:
@@ -5994,7 +6019,7 @@ def execute_quick_import(
     if quick_errors:
         for err in quick_errors:
             st.error(err)
-        st.info("テンプレートの列構成と突合してください。『テンプレートをダウンロード』から最新のCSVサンプルを取得できます。")
+        st.info(t("quick_import.template_hint"))
         return
 
     policy = {"explanation": "overwrite", "tags": "merge"}
@@ -6008,7 +6033,7 @@ def execute_quick_import(
         try:
             normalized_q = normalize_questions(questions_df)
         except Exception as exc:
-            st.error(f"questions.csv の整形に失敗しました: {exc}")
+            st.error(t("quick_import.error.normalize_questions", error=exc))
             normalization_failed = True
             normalized_q = None
     else:
@@ -6018,14 +6043,14 @@ def execute_quick_import(
         try:
             normalized_a = normalize_answers(answers_df)
         except Exception as exc:
-            st.error(f"answers.csv の整形に失敗しました: {exc}")
+            st.error(t("quick_import.error.normalize_answers", error=exc))
             normalization_failed = True
             normalized_a = None
     else:
         normalized_a = None
 
     if normalization_failed:
-        st.warning("列名や値の形式を見直してから再度インポートしてください。")
+        st.warning(t("quick_import.warning.normalize_failed"))
         return
 
     if normalized_q is not None and normalized_a is not None:
@@ -6037,7 +6062,7 @@ def execute_quick_import(
     elif normalized_a is not None:
         existing = load_questions_df()
         if existing.empty:
-            st.error("設問データが存在しません。answers.csv を取り込む前に questions.csv を読み込んでください。")
+            st.error(t("quick_import.error.answers_without_questions"))
         else:
             merged_df, rejects_q, rejects_a, conflicts = merge_questions_answers(
                 existing, normalized_a, policy=policy
@@ -6048,23 +6073,27 @@ def execute_quick_import(
 
     inserted, updated = db.upsert_questions(merged_df)
     rebuild_tfidf_cache()
-    st.success(f"クイックインポートが完了しました。追加 {inserted} 件 / 更新 {updated} 件")
+    st.success(t("quick_import.status.success", inserted=inserted, updated=updated))
 
     if not rejects_q.empty or not rejects_a.empty:
         st.warning(
-            f"取り込めなかったレコードがあります。questions: {len(rejects_q)} 件 / answers: {len(rejects_a)} 件"
+            t(
+                "quick_import.status.warnings",
+                questions=len(rejects_q),
+                answers=len(rejects_a),
+            )
         )
-        with st.expander("取り込めなかった行の詳細", expanded=False):
+        with st.expander(t("quick_import.rejects.expander"), expanded=False):
             if not rejects_q.empty:
-                st.markdown("**questions.csv**")
+                st.markdown(t("quick_import.rejects.questions"))
                 st.dataframe(rejects_q.head(20))
             if not rejects_a.empty:
-                st.markdown("**answers.csv**")
+                st.markdown(t("quick_import.rejects.answers"))
                 st.dataframe(rejects_a.head(20))
-            st.caption("理由列を参考にCSVの該当行を修正してください。全件はrejects_*.csvでダウンロードできます。")
+            st.caption(t("quick_import.rejects.caption"))
 
     if not conflicts.empty:
-        st.info(f"正答の衝突が {len(conflicts)} 件あり、上書きしました。")
+        st.info(t("quick_import.conflicts", count=len(conflicts)))
 
 
 def render_quick_import_controls(
@@ -6077,14 +6106,14 @@ def render_quick_import_controls(
     if heading:
         st.markdown(heading)
 
-    st.caption("questions.csv と answers.csv をまとめてドラッグ＆ドロップできます。必要な方だけでも取り込めます。")
+    st.caption(t("quick_import.caption"))
 
     uploaded_files = st.file_uploader(
-        "questions.csv / answers.csv をアップロード",
+        t("quick_import.uploader"),
         type=["csv"],
         accept_multiple_files=True,
         key=f"{key_prefix}_quick_import_files",
-        help="複数ファイルを同時に選択すると自動で候補に入ります。",
+        help=t("quick_import.help"),
     )
 
     combined_files: List["UploadedFile"] = []
@@ -6098,7 +6127,7 @@ def render_quick_import_controls(
     if initial_files:
         for file in initial_files:
             add_file(file)
-        st.caption("ドロップゾーンに追加したファイルが候補として表示されています。")
+        st.caption(t("quick_import.drop_caption"))
 
     if uploaded_files:
         for file in uploaded_files:
@@ -6108,7 +6137,8 @@ def render_quick_import_controls(
     question_default = select_uploaded_file_by_name(option_files, "questions") or select_uploaded_file_by_name(option_files, "question")
     answer_default = select_uploaded_file_by_name(option_files, "answers") or select_uploaded_file_by_name(option_files, "answer")
 
-    options = ["選択しない"] + [file.name for file in option_files]
+    none_option = "__none__"
+    options = [none_option] + [file.name for file in option_files]
 
     def get_default_index(default_file: Optional["UploadedFile"]) -> int:
         if default_file is None:
@@ -6122,17 +6152,25 @@ def render_quick_import_controls(
     answer_index = get_default_index(answer_default)
 
     if not option_files:
-        st.caption("ファイルを選択するとここに一覧表示されます。上部のドロップゾーンか右のボタンから追加してください。")
+        st.caption(t("quick_import.no_files"))
 
     question_selection = st.selectbox(
-        "questions.csv", options, index=question_index, key=f"{key_prefix}_quick_import_question"
+        t("quick_import.select.questions"),
+        options,
+        index=question_index,
+        key=f"{key_prefix}_quick_import_question",
+        format_func=lambda name: t("quick_import.option.none") if name == none_option else name,
     )
     answer_selection = st.selectbox(
-        "answers.csv", options, index=answer_index, key=f"{key_prefix}_quick_import_answer"
+        t("quick_import.select.answers"),
+        options,
+        index=answer_index,
+        key=f"{key_prefix}_quick_import_answer",
+        format_func=lambda name: t("quick_import.option.none") if name == none_option else name,
     )
 
     def resolve_selection(selection: str) -> Optional["UploadedFile"]:
-        if selection == "選択しない":
+        if selection == none_option:
             return None
         for file in option_files:
             if file.name == selection:
@@ -6142,7 +6180,7 @@ def render_quick_import_controls(
     selected_questions = resolve_selection(question_selection)
     selected_answers = resolve_selection(answer_selection)
 
-    if st.button("クイックインポート実行", key=f"{key_prefix}_quick_import_button"):
+    if st.button(t("quick_import.button"), key=f"{key_prefix}_quick_import_button"):
         execute_quick_import(db, selected_questions, selected_answers)
 
 
@@ -6161,32 +6199,43 @@ def render_history_export_controls(
     if not attempts_df.empty:
         buffer = io.StringIO()
         attempts_df.to_csv(buffer, index=False)
-        st.download_button("attempts.csv をダウンロード", buffer.getvalue(), file_name="attempts.csv", mime="text/csv")
+        st.download_button(
+            t("history_export.attempts.download"),
+            buffer.getvalue(),
+            file_name="attempts.csv",
+            mime="text/csv",
+        )
     else:
-        st.caption("attempts.csv：学習履歴はまだありません。学習モードで解答するとダウンロード可能になります。")
+        st.caption(t("history_export.attempts.empty"))
 
     if not exams_df.empty:
         buffer = io.StringIO()
         exams_df.to_csv(buffer, index=False)
-        st.download_button("exams.csv をダウンロード", buffer.getvalue(), file_name="exams.csv", mime="text/csv")
+        st.download_button(
+            t("history_export.exams.download"),
+            buffer.getvalue(),
+            file_name="exams.csv",
+            mime="text/csv",
+        )
     else:
-        st.caption("exams.csv：模試の受験履歴はまだありません。模試モードで本試験を体験しましょう。")
+        st.caption(t("history_export.exams.empty"))
 
     if DB_PATH.exists():
-        st.download_button("SQLiteバックアップをダウンロード", DB_PATH.read_bytes(), file_name="takken.db")
+        st.download_button(
+            t("history_export.sqlite.download"),
+            DB_PATH.read_bytes(),
+            file_name="takken.db",
+        )
 
 
 def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     render_specialized_header(parent_nav, "データ入出力", "data_io")
-    st.subheader("データ入出力")
+    st.subheader(t("data_io.header"))
     auth_key = "data_io_authenticated"
     hash_key = "data_io_password_hash"
     expected_password = get_data_io_password()
     if not expected_password:
-        st.warning(
-            "データ入出力の管理パスワードが設定されていません。"
-            "Streamlit の secrets もしくは DATA_IO_PASSWORD 環境変数に値を設定してください。"
-        )
+        st.warning(t("data_io.password.warning"))
         st.session_state.pop(hash_key, None)
         st.session_state[auth_key] = False
         st.stop()
@@ -6198,88 +6247,89 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
 
         if not st.session_state.get(auth_key, False):
             with st.form("data_io_password", clear_on_submit=True):
-                password_input = st.text_input("データ入出力パスワード", type="password", key="data_io_password_input")
-                submitted = st.form_submit_button("認証")
+                password_input = st.text_input(
+                    t("data_io.password.label"),
+                    type="password",
+                    key="data_io_password_input",
+                )
+                submitted = st.form_submit_button(t("data_io.password.submit"))
 
             if not submitted:
-                st.warning("データ入出力パスワードを入力してください。")
+                st.warning(t("data_io.password.prompt"))
                 return
             if not password_input:
-                st.warning("データ入出力パスワードを入力してください。")
+                st.warning(t("data_io.password.prompt"))
                 return
             if password_input != expected_password:
-                st.warning("パスワードが正しくありません。")
+                st.warning(t("data_io.password.invalid"))
                 return
             st.session_state[auth_key] = True
 
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     import_notifications = st.session_state.setdefault("import_notifications", [])
     if import_notifications:
-        st.markdown("### インポート履歴 (このセッション)")
+        st.markdown(f"### {t('data_io.history')}")
         history_df = pd.DataFrame(import_notifications)
         ordered_columns = [
             col
             for col in ["timestamp", "inserted", "updated", "rejected", "seconds"]
             if col in history_df.columns
         ]
-        display_df = history_df[ordered_columns].rename(
-            columns={
-                "timestamp": "完了時刻",
-                "inserted": "追加",
-                "updated": "更新",
-                "rejected": "リジェクト",
-                "seconds": "処理秒数",
-            }
-        )
+        column_labels = {
+            "timestamp": t("data_io.history.timestamp"),
+            "inserted": t("data_io.history.inserted"),
+            "updated": t("data_io.history.updated"),
+            "rejected": t("data_io.history.rejected"),
+            "seconds": t("data_io.history.seconds"),
+        }
+        display_df = history_df[ordered_columns].rename(columns=column_labels)
         st.dataframe(display_df, width="stretch")
-    st.markdown("### テンプレートファイル")
+    st.markdown(f"### {t('data_io.templates')}")
     st.download_button(
-        "テンプレートをダウンロード (ZIP)",
+        t("data_io.templates.download"),
         data=get_template_archive(),
         file_name=f"takken_templates_{timestamp}.zip",
         mime="application/zip",
     )
-    st.caption("設問・正答データのCSV/XLSXテンプレートが含まれます。必要に応じて編集してご利用ください。")
+    st.caption(t("data_io.templates.caption"))
     st.video(CSV_IMPORT_TUTORIAL_URL)
     st.markdown(build_csv_import_guide_markdown())
     if SCHEMA_GUIDE_PATH.exists():
-        st.markdown(
-            "📘 データ列の詳細仕様は下記のスキーマガイドで確認できます。テンプレート編集前にご覧ください。"
-        )
-        with st.expander("questions.csv / answers.csv / law_revision.csv のスキーマガイド"):
+        st.markdown(t("data_io.schema.guide"))
+        with st.expander(t("data_io.schema.expander")):
             st.markdown(SCHEMA_GUIDE_PATH.read_text(encoding="utf-8"))
     sample_cols = st.columns(4)
     with sample_cols[0]:
         st.download_button(
-            "サンプル questions.csv",
+            t("data_io.sample.questions"),
             data=build_sample_questions_csv(),
             file_name="sample_questions.csv",
             mime="text/csv",
-            help="Excelで開いて値を上書きすれば、そのまま取り込みできます。",
+            help=t("data_io.sample.questions.help"),
         )
     with sample_cols[1]:
         st.download_button(
-            "サンプル answers.csv",
+            t("data_io.sample.answers"),
             data=build_sample_answers_csv(),
             file_name="sample_answers.csv",
             mime="text/csv",
-            help="正答番号や解説の記入例です。コピーしてご利用ください。",
+            help=t("data_io.sample.answers.help"),
         )
     with sample_cols[2]:
         st.download_button(
-            "サンプル predicted.csv",
+            t("data_io.sample.predicted"),
             data=build_sample_predicted_csv(),
             file_name="sample_predicted.csv",
             mime="text/csv",
-            help="予想問題の入力例です。ラベルや出典を記入して活用ください。",
+            help=t("data_io.sample.predicted.help"),
         )
     with sample_cols[3]:
         st.download_button(
-            "サンプル law_revision.csv",
+            t("data_io.sample.law_revision"),
             data=build_sample_law_revision_csv(),
             file_name="sample_law_revision.csv",
             mime="text/csv",
-            help="最新の法改正論点を整理した問題サンプルです。改正年度や施行日を追記してご利用ください。",
+            help=t("data_io.sample.law_revision.help"),
         )
     st.markdown("### 外部サービス同期")
     integrations = st.session_state["settings"].setdefault("integrations", {})
@@ -6441,7 +6491,7 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     render_quick_import_controls(
         db,
         key_prefix="settings",
-        heading="### クイックインポート (questions.csv / answers.csv)",
+        heading=t("quick_import.heading.settings"),
     )
 
     st.markdown("### 予想問題インポート (predicted.csv)")
@@ -6917,19 +6967,34 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
 
 
 def render_settings(db: DBManager) -> None:
-    st.title("設定")
-    tabs = st.tabs(["表示・操作設定", "データ入出力"])
+    st.title(t("settings.title"))
+    tabs = st.tabs([t("settings.tab.display"), t("settings.tab.data")])
     with tabs[0]:
         settings = st.session_state["settings"]
-        st.info("学習体験を自分好みにカスタマイズできます。各項目の説明を参考に調整してください。")
+        language_options = list(available_languages())
+        current_language = get_current_language()
+        if current_language not in language_options:
+            current_language = DEFAULT_LANGUAGE
+        selected_language = st.selectbox(
+            t("language.label"),
+            language_options,
+            index=language_options.index(current_language),
+            format_func=lambda code: t(f"language.{code}"),
+        )
+        if selected_language != current_language:
+            set_current_language(selected_language)
+            safe_rerun()
+
+        st.info(t("settings.intro"))
         theme_options = ["ライト", "ダーク", "セピア"]
         current_theme = settings.get("theme", "セピア")
         theme_index = theme_options.index(current_theme) if current_theme in theme_options else 0
         settings["theme"] = st.selectbox(
-            "テーマ",
+            t("settings.theme.label"),
             theme_options,
             index=theme_index,
-            help="画面の配色を切り替えます。暗い環境ではダークテーマ、長文読解にはセピアテーマがおすすめです。",
+            format_func=lambda option: t(THEME_OPTION_LABELS.get(option, option)),
+            help=t("settings.theme.help"),
         )
         size_options = list(FONT_SIZE_SCALE.keys())
         default_size = settings.get("font_size", "標準")
@@ -6939,60 +7004,61 @@ def render_settings(db: DBManager) -> None:
             else size_options.index("標準")
         )
         settings["font_size"] = st.selectbox(
-            "フォントサイズ",
+            t("settings.font_size.label"),
             size_options,
             index=size_index,
-            help="文字サイズを調整して読みやすさを最適化します。『大きい』は夜間学習や高解像度モニタ向きです。",
+            format_func=lambda option: t(FONT_SIZE_LABELS.get(option, option)),
+            help=t("settings.font_size.help"),
         )
         settings["shuffle_choices"] = st.checkbox(
-            "選択肢をシャッフル",
+            t("settings.shuffle_choices"),
             value=settings.get("shuffle_choices", True),
-            help="毎回選択肢の順番をランダムに入れ替えて、位置記憶に頼らない訓練を行います。",
+            help=t("settings.shuffle_choices.help"),
         )
         settings["timer"] = st.checkbox(
-            "タイマーを表示",
+            t("settings.timer"),
             value=settings.get("timer", True),
-            help="回答画面に経過時間を表示して本番同様の時間感覚を養います。",
+            help=t("settings.timer.help"),
         )
         sm2_key = "settings_sm2_initial_ease"
         current_sm2 = float(settings.get("sm2_initial_ease", 2.5))
         settings["sm2_initial_ease"] = st.slider(
-            "SM-2初期ease",
+            t("settings.sm2.label"),
             min_value=1.3,
             max_value=3.0,
             value=current_sm2,
-            help="間隔反復アルゴリズムの初期難易度です。既定値2.5で迷ったらそのままにしましょう。",
+            help=t("settings.sm2.help"),
             key=sm2_key,
         )
         settings["auto_advance"] = st.checkbox(
-            "採点後に自動で次問へ進む (0.8秒遅延)",
+            t("settings.auto_advance"),
             value=settings.get("auto_advance", False),
-            help="正誤判定後に待機せず次の問題へ進みたい場合に有効化します。",
+            help=t("settings.auto_advance.help"),
         )
         low_conf_key = "settings_review_low_confidence_threshold"
         current_low_conf = int(settings.get("review_low_confidence_threshold", 60))
         settings["review_low_confidence_threshold"] = st.slider(
-            "低確信として扱う確信度 (%)",
+            t("settings.review.low_confidence"),
             min_value=0,
             max_value=100,
             value=current_low_conf,
-            help="自己評価の確信度がこの値未満なら復習対象に含めます。",
+            help=t("settings.review.low_confidence.help"),
             key=low_conf_key,
         )
         elapsed_key = "settings_review_elapsed_days"
         current_elapsed = int(settings.get("review_elapsed_days", 7))
         settings["review_elapsed_days"] = st.slider(
-            "復習抽出の経過日数しきい値",
+            t("settings.review.elapsed_days"),
             min_value=1,
             max_value=30,
             value=current_elapsed,
-            help="最終挑戦からこの日数が経過した問題を復習候補に追加します。",
+            help=t("settings.review.elapsed_days.help"),
             key=elapsed_key,
         )
         integrations = settings.setdefault("integrations", {})
-        st.markdown("#### 外部サービス連携設定")
-        st.caption("Google Calendar や Notion 連携に必要なOAuth情報を入力してください。値はブラウザセッション内で保持されます。")
-        with st.expander("Google Calendar 連携"):
+        st.markdown("#### " + t("settings.integrations.heading"))
+        st.caption(t("settings.integrations.caption"))
+        with st.expander(t("settings.google.expander")):
             google_config = integrations.setdefault(
                 "google_calendar",
                 {
@@ -7004,34 +7070,34 @@ def render_settings(db: DBManager) -> None:
                     "calendar_id": "primary",
                 },
             )
-            google_config["client_id"] = st.text_input("Client ID", value=google_config.get("client_id", ""))
+            google_config["client_id"] = st.text_input(t("settings.google.client_id"), value=google_config.get("client_id", ""))
             google_config["client_secret"] = st.text_input(
-                "Client Secret",
+                t("settings.google.client_secret"),
                 value=google_config.get("client_secret", ""),
                 type="password",
             )
             google_config["redirect_uri"] = st.text_input(
-                "Redirect URI",
+                t("settings.google.redirect_uri"),
                 value=google_config.get("redirect_uri", ""),
-                help="OAuth同意画面で設定したリダイレクトURLを入力してください。",
+                help=t("settings.google.redirect_uri.help"),
             )
             google_config["access_token"] = st.text_input(
-                "Access Token",
+                t("settings.google.access_token"),
                 value=google_config.get("access_token", ""),
                 type="password",
-                help="有効なアクセストークンを入力すると即時同期できます。",
+                help=t("settings.google.access_token.help"),
             )
             google_config["refresh_token"] = st.text_input(
-                "Refresh Token",
+                t("settings.google.refresh_token"),
                 value=google_config.get("refresh_token", ""),
                 type="password",
             )
             google_config["calendar_id"] = st.text_input(
-                "対象カレンダーID",
+                t("settings.google.calendar_id"),
                 value=google_config.get("calendar_id", "primary"),
-                help="primary のままにするとメインカレンダーへ書き込みます。",
+                help=t("settings.google.calendar_id.help"),
             )
-        with st.expander("Notion 連携"):
+        with st.expander(t("settings.notion.expander")):
             notion_config = integrations.setdefault(
                 "notion",
                 {
@@ -7041,25 +7107,25 @@ def render_settings(db: DBManager) -> None:
                 },
             )
             notion_config["integration_token"] = st.text_input(
-                "Integration Token",
+                t("settings.notion.token"),
                 value=notion_config.get("integration_token", ""),
                 type="password",
             )
             notion_config["database_id"] = st.text_input(
-                "データベースID",
+                t("settings.notion.database_id"),
                 value=notion_config.get("database_id", ""),
             )
             notion_config["notion_version"] = st.text_input(
-                "Notion-Version",
+                t("settings.notion.version"),
                 value=notion_config.get("notion_version", "2022-06-28"),
-                help="Notion APIのバージョン文字列を必要に応じて変更してください。",
+                help=t("settings.notion.version.help"),
             )
         if st.button(
-            "TF-IDFを再学習",
-            help="検索精度が気になるときに再計算します。データ更新後の再実行がおすすめです。",
+            t("settings.tfidf"),
+            help=t("settings.tfidf.help"),
         ):
             rebuild_tfidf_cache()
-            st.success("TF-IDFを再学習しました")
+            st.success(t("settings.tfidf.success"))
     with tabs[1]:
         render_data_io(db, parent_nav="設定")
 
