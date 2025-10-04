@@ -1,3 +1,4 @@
+import csv
 import datetime as dt
 import hashlib
 import html as html_module
@@ -5,12 +6,14 @@ import io
 import json
 import logging
 import os
+import posixpath
 import random
 import re
 import time
 import traceback
 import uuid
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
@@ -116,6 +119,20 @@ CSV_IMPORT_GUIDE_POINTS = [
     "バリデーション結果でエラー行を確認し、必要に応じて再修正する",
     "正常に取り込めたらTF-IDFの再学習や履歴エクスポートを活用する",
 ]
+
+
+MAX_QUICK_IMPORT_FILE_SIZE = 200 * 1024 * 1024
+ALLOWED_QUICK_IMPORT_SUFFIXES = {".csv", ".tsv", ".xlsx"}
+QUESTION_REQUIRED_COLUMNS = [
+    "year",
+    "q_no",
+    "question",
+    "choice1",
+    "choice2",
+    "choice3",
+    "choice4",
+]
+ANSWER_REQUIRED_COLUMNS = ["year", "q_no", "correct_number"]
 
 
 def build_csv_import_guide_markdown() -> str:
@@ -6640,38 +6657,222 @@ def select_uploaded_file_by_name(
     return None
 
 
+def sniff_delimited_header(data: bytes, suffix: str) -> Tuple[List[str], str, str]:
+    sample_size = min(len(data), 128 * 1024)
+    sample = data[:sample_size]
+    chosen_encoding = "utf-8"
+    decoded_sample: Optional[str] = None
+    for encoding in ("utf-8", "cp932"):
+        try:
+            decoded_sample = sample.decode(encoding)
+            chosen_encoding = encoding
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded_sample is None:
+        decoded_sample = sample.decode("utf-8", errors="ignore")
+
+    delimiters = [",", "\t", ";", "|"]
+    default_delimiter = "\t" if suffix == ".tsv" else ","
+    try:
+        dialect = csv.Sniffer().sniff(decoded_sample, delimiters=delimiters)
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = default_delimiter
+
+    reader = csv.reader(io.StringIO(decoded_sample), delimiter=delimiter)
+    header = next(reader, [])
+    normalized_header = [str(col).strip() for col in header if col is not None]
+    return normalized_header, delimiter, chosen_encoding
+
+
+def extract_xlsx_header(data: bytes) -> List[str]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            workbook_xml = archive.read("xl/workbook.xml")
+            workbook_root = ET.fromstring(workbook_xml)
+            ns_main = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            ns_rel = {
+                "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+                "docrel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            }
+            sheets = workbook_root.find("main:sheets", ns_main)
+            if sheets is None:
+                return []
+            first_sheet = sheets.find("main:sheet", ns_main)
+            if first_sheet is None:
+                return []
+            rel_id = first_sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            if not rel_id:
+                return []
+            rels_path = "xl/_rels/workbook.xml.rels"
+            try:
+                rels_root = ET.fromstring(archive.read(rels_path))
+            except KeyError:
+                return []
+            sheet_target: Optional[str] = None
+            for rel in rels_root.findall("rel:Relationship", ns_rel):
+                if rel.attrib.get("Id") == rel_id:
+                    sheet_target = rel.attrib.get("Target")
+                    break
+            if not sheet_target:
+                return []
+            sheet_path = sheet_target
+            if not sheet_path.startswith("xl/"):
+                sheet_path = posixpath.normpath(posixpath.join("xl", sheet_path))
+            try:
+                sheet_xml = archive.read(sheet_path)
+            except KeyError:
+                return []
+            sheet_root = ET.fromstring(sheet_xml)
+            sheet_data = sheet_root.find("main:sheetData", ns_main)
+            if sheet_data is None:
+                return []
+            first_row = sheet_data.find("main:row", ns_main)
+            if first_row is None:
+                return []
+            shared_strings: List[str] = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                for si in shared_root.findall("main:si", ns_main):
+                    text_parts = [node.text or "" for node in si.findall(".//main:t", ns_main)]
+                    shared_strings.append("".join(text_parts))
+            headers: List[str] = []
+            for cell in first_row.findall("main:c", ns_main):
+                cell_type = cell.attrib.get("t")
+                value = ""
+                if cell_type == "s":
+                    v = cell.find("main:v", ns_main)
+                    if v is not None and v.text is not None:
+                        try:
+                            index = int(v.text)
+                            value = shared_strings[index] if index < len(shared_strings) else ""
+                        except (ValueError, IndexError):
+                            value = ""
+                elif cell_type == "inlineStr":
+                    inline = cell.find("main:is", ns_main)
+                    if inline is not None:
+                        text_nodes = inline.findall(".//main:t", ns_main)
+                        value = "".join(node.text or "" for node in text_nodes)
+                else:
+                    v = cell.find("main:v", ns_main)
+                    if v is not None and v.text is not None:
+                        value = v.text
+                headers.append(value.strip())
+            return headers
+    except (zipfile.BadZipFile, KeyError, ET.ParseError):
+        return []
+    return []
+
+
+def validate_uploaded_file(
+    uploaded: "UploadedFile",
+    *,
+    required_columns: Sequence[str],
+    display_label: str,
+) -> Tuple[Optional[pd.DataFrame], List[str]]:
+    errors: List[str] = []
+    suffix = Path(uploaded.name).suffix.lower()
+    if suffix not in ALLOWED_QUICK_IMPORT_SUFFIXES:
+        errors.append(
+            f"{display_label}（{uploaded.name}）は未対応のファイル形式です。対応形式: {', '.join(sorted(ALLOWED_QUICK_IMPORT_SUFFIXES))}"
+        )
+        return None, errors
+    if uploaded.size and uploaded.size > MAX_QUICK_IMPORT_FILE_SIZE:
+        errors.append(
+            f"{display_label}（{uploaded.name}）のサイズが上限（200MB）を超えています。"
+        )
+        return None, errors
+
+    data = uploaded.getvalue()
+    if not data:
+        errors.append(f"{display_label}（{uploaded.name}）が空のファイルです。")
+        return None, errors
+
+    header: List[str]
+    delimiter = ","
+    encoding = "utf-8"
+    if suffix in {".csv", ".tsv"}:
+        header, delimiter, encoding = sniff_delimited_header(data, suffix)
+    elif suffix == ".xlsx":
+        header = extract_xlsx_header(data)
+    else:
+        header = []
+
+    missing_columns = [col for col in required_columns if col not in header]
+    if missing_columns:
+        errors.append(f"必須列が不足しています: {', '.join(missing_columns)}")
+        return None, errors
+
+    try:
+        if suffix == ".xlsx":
+            df = pd.read_excel(io.BytesIO(data))
+        else:
+            read_kwargs = {"sep": delimiter} if suffix == ".tsv" or delimiter != "," else {}
+            try:
+                df = pd.read_csv(io.BytesIO(data), encoding=encoding, **read_kwargs)
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.BytesIO(data), encoding="cp932", **read_kwargs)
+    except Exception as exc:  # pragma: no cover - pandas errors vary by input
+        errors.append(f"{display_label}（{uploaded.name}）の読み込みに失敗しました: {exc}")
+        return None, errors
+
+    return df, errors
+
+
 def execute_quick_import(
     db: DBManager,
     questions_file: Optional["UploadedFile"],
     answers_file: Optional["UploadedFile"],
 ) -> None:
-    quick_errors: List[str] = []
+    quick_errors: Dict[str, List[str]] = {}
     questions_df: Optional[pd.DataFrame] = None
     answers_df: Optional[pd.DataFrame] = None
     if questions_file is None and answers_file is None:
         st.warning("questions.csv か answers.csv のいずれかを選択してください。")
         return
 
+    validation_results: List[Tuple[str, str, List[str]]] = []
+
     if questions_file is not None:
-        data = questions_file.getvalue()
-        try:
-            questions_df = pd.read_csv(io.BytesIO(data))
-        except UnicodeDecodeError:
-            questions_df = pd.read_csv(io.BytesIO(data), encoding="cp932")
-        quick_errors.extend(validate_question_records(questions_df))
+        questions_df, errors = validate_uploaded_file(
+            questions_file,
+            required_columns=QUESTION_REQUIRED_COLUMNS,
+            display_label="questions.csv",
+        )
+        if questions_df is not None:
+            row_errors = validate_question_records(questions_df)
+            if row_errors:
+                errors.extend(row_errors)
+        validation_results.append(("questions.csv", questions_file.name, errors))
+        if errors:
+            quick_errors["questions"] = errors
 
     if answers_file is not None:
-        data = answers_file.getvalue()
-        try:
-            answers_df = pd.read_csv(io.BytesIO(data))
-        except UnicodeDecodeError:
-            answers_df = pd.read_csv(io.BytesIO(data), encoding="cp932")
-        quick_errors.extend(validate_answer_records(answers_df))
+        answers_df, errors = validate_uploaded_file(
+            answers_file,
+            required_columns=ANSWER_REQUIRED_COLUMNS,
+            display_label="answers.csv",
+        )
+        if answers_df is not None:
+            row_errors = validate_answer_records(answers_df)
+            if row_errors:
+                errors.extend(row_errors)
+        validation_results.append(("answers.csv", answers_file.name, errors))
+        if errors:
+            quick_errors["answers"] = errors
+
+    for display_label, filename, errors in validation_results:
+        if errors:
+            st.error(f"{display_label}（{filename}）で問題が見つかりました。")
+            st.markdown("\n".join(f"- {err}" for err in errors))
+        else:
+            st.success(f"{display_label}（{filename}）の検証に成功しました。")
 
     if quick_errors:
-        for err in quick_errors:
-            st.error(err)
-        st.info("テンプレートの列構成と突合してください。『テンプレートをダウンロード』から最新のCSVサンプルを取得できます。")
+        st.info(
+            "テンプレートの列構成と突合してください。『テンプレートをダウンロード』から最新のサンプルを取得できます。"
+        )
         return
 
     policy = {"explanation": "overwrite", "tags": "merge"}
@@ -6758,7 +6959,7 @@ def render_quick_import_controls(
 
     uploaded_files = st.file_uploader(
         "questions.csv / answers.csv をアップロード",
-        type=["csv"],
+        type=["csv", "tsv", "xlsx"],
         accept_multiple_files=True,
         key=f"{key_prefix}_quick_import_files",
         help="複数ファイルを同時に選択すると自動で候補に入ります。",
