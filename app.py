@@ -6823,6 +6823,35 @@ def render_quick_import_controls(
         execute_quick_import(db, selected_questions, selected_answers)
 
 
+def _format_export_size(size_bytes: Optional[int]) -> str:
+    if size_bytes is None:
+        return "不明"
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(size_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size_bytes} B"
+
+
+def _build_export_caption(
+    *,
+    description: str,
+    row_count: Optional[int],
+    size_bytes: Optional[int],
+) -> str:
+    parts = [f"📦 {description}"]
+    if row_count is not None:
+        parts.append(f"レコード数: {row_count:,}件")
+    if size_bytes is not None:
+        parts.append(f"推定サイズ: {_format_export_size(size_bytes)}")
+    return " / ".join(parts)
+
+
 def render_history_export_controls(
     db: DBManager,
     *,
@@ -6831,26 +6860,88 @@ def render_history_export_controls(
     if heading:
         st.markdown(heading)
 
+    timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+
     with db.engine.connect() as conn:
         attempts_df = pd.read_sql(select(attempts_table), conn)
         exams_df = pd.read_sql(select(exams_table), conn)
 
-    if not attempts_df.empty:
-        buffer = io.StringIO()
-        attempts_df.to_csv(buffer, index=False)
-        st.download_button("attempts.csv をダウンロード", buffer.getvalue(), file_name="attempts.csv", mime="text/csv")
-    else:
-        st.caption("attempts.csv：学習履歴はまだありません。学習モードで解答するとダウンロード可能になります。")
+    columns = st.columns(3)
 
-    if not exams_df.empty:
-        buffer = io.StringIO()
-        exams_df.to_csv(buffer, index=False)
-        st.download_button("exams.csv をダウンロード", buffer.getvalue(), file_name="exams.csv", mime="text/csv")
-    else:
-        st.caption("exams.csv：模試の受験履歴はまだありません。模試モードで本試験を体験しましょう。")
+    with columns[0]:
+        st.markdown("#### 📚 学習履歴 (attempts.csv)")
+        if not attempts_df.empty:
+            buffer = io.StringIO()
+            attempts_df.to_csv(buffer, index=False)
+            csv_value = buffer.getvalue()
+            size_bytes = len(csv_value.encode("utf-8"))
+            st.download_button(
+                "attempts.csv をダウンロード",
+                csv_value,
+                file_name=f"attempts_{timestamp}.csv",
+                mime="text/csv",
+                type="primary",
+                help="学習モードでの全回答履歴をCSV形式でエクスポートします。",
+            )
+            st.caption(
+                _build_export_caption(
+                    row_count=len(attempts_df),
+                    size_bytes=size_bytes,
+                    description="学習モードでの回答履歴",
+                )
+            )
+        else:
+            st.caption(
+                "attempts.csv：学習履歴はまだありません。学習モードで解答するとダウンロード可能になります。"
+            )
 
-    if DB_PATH.exists():
-        st.download_button("SQLiteバックアップをダウンロード", DB_PATH.read_bytes(), file_name="takken.db")
+    with columns[1]:
+        st.markdown("#### 📝 模試履歴 (exams.csv)")
+        if not exams_df.empty:
+            buffer = io.StringIO()
+            exams_df.to_csv(buffer, index=False)
+            csv_value = buffer.getvalue()
+            size_bytes = len(csv_value.encode("utf-8"))
+            st.download_button(
+                "exams.csv をダウンロード",
+                csv_value,
+                file_name=f"exams_{timestamp}.csv",
+                mime="text/csv",
+                type="primary",
+                help="模試モードでの受験結果をCSV形式でエクスポートします。",
+            )
+            st.caption(
+                _build_export_caption(
+                    row_count=len(exams_df),
+                    size_bytes=size_bytes,
+                    description="模試モードでの受験履歴",
+                )
+            )
+        else:
+            st.caption(
+                "exams.csv：模試の受験履歴はまだありません。模試モードで本試験を体験しましょう。"
+            )
+
+    with columns[2]:
+        st.markdown("#### 🗄️ SQLite バックアップ")
+        if DB_PATH.exists():
+            db_bytes = DB_PATH.read_bytes()
+            st.download_button(
+                "SQLiteバックアップをダウンロード",
+                db_bytes,
+                file_name=f"takken_{timestamp}.db",
+                type="primary",
+                help="アプリ全体のデータベースをそのままバックアップとして取得します。",
+            )
+            st.caption(
+                _build_export_caption(
+                    row_count=None,
+                    size_bytes=len(db_bytes),
+                    description="SQLite データベースファイル",
+                )
+            )
+        else:
+            st.caption("バックアップファイルが見つかりません。データベースがまだ作成されていない可能性があります。")
 
 
 def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
