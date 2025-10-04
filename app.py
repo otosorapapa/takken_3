@@ -2185,13 +2185,13 @@ def validate_law_revision_records(df: pd.DataFrame) -> List[str]:
         if len(set(non_empty)) < len(non_empty):
             errors.append(f"{label}: 選択肢が重複しています。")
         revision_year_value = getattr(row, "revision_year", None)
-        if revision_year_value not in (None, "", pd.NA):
+        if not (pd.isna(revision_year_value) or str(revision_year_value).strip() == ""):
             try:
                 int(str(revision_year_value).strip())
             except Exception:
                 errors.append(f"{label}: revision_year は西暦の数値で入力してください。")
         correct_value = getattr(row, "correct", None)
-        if correct_value not in (None, "", pd.NA):
+        if not (pd.isna(correct_value) or str(correct_value).strip() == ""):
             try:
                 numeric_correct = int(correct_value)
             except Exception:
