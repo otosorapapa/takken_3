@@ -813,10 +813,6 @@ def safe_popover(label: str, **kwargs):
     return st.expander(label, expanded=expanded)
 
 
-def handle_nav_change() -> None:
-    st.session_state["nav"] = st.session_state.get("_nav_widget", "ホーム")
-
-
 def navigate_to(section: str) -> None:
     st.session_state["nav"] = section
     st.session_state["_nav_widget"] = section
@@ -3659,22 +3655,71 @@ def main() -> None:
 
     sidebar = st.sidebar
     sidebar.title("宅建10年ドリル")
-    if st.session_state.get("_nav_widget") != st.session_state.get("nav"):
-        st.session_state["_nav_widget"] = st.session_state.get("nav", "学習")
+
     menu_options = ["学習", "模試", "統計", "設定"]
     current_nav = st.session_state.get("nav", menu_options[0])
     if current_nav not in menu_options:
         current_nav = menu_options[0]
         st.session_state["nav"] = current_nav
+
+    if st.session_state.get("_nav_widget") != current_nav:
         st.session_state["_nav_widget"] = current_nav
-    sidebar.radio(
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stSegmentedControl"] {
+            padding: 0.5rem 0 1rem;
+        }
+        div[data-testid="stSegmentedControl"] > div {
+            gap: 0.75rem;
+            background: var(--secondary-background-color);
+            padding: 0.4rem;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.04);
+        }
+        div[data-testid="stSegmentedControl"] button {
+            padding: 0.65rem 1.6rem;
+            border-radius: 999px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: inherit;
+            font-weight: 600;
+            transition: background-color 0.2s ease, color 0.2s ease,
+                        box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        div[data-testid="stSegmentedControl"] button[data-selected="true"] {
+            background: var(--primary-color, #3B82F6);
+            color: #FFFFFF;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+            transform: translateY(-1px);
+        }
+        div[data-testid="stSegmentedControl"] button:hover {
+            background: rgba(59, 130, 246, 0.12);
+        }
+        div[data-testid="stSegmentedControl"] button[data-selected="true"]:hover {
+            background: #2563EB;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.segmented_control(
         "メニュー",
         menu_options,
-        index=menu_options.index(current_nav),
+        selection_mode="single",
         key="_nav_widget",
-        on_change=with_rerun(handle_nav_change),
+        label_visibility="collapsed",
+        width="stretch",
     )
-    nav = st.session_state.get("nav", menu_options[0])
+
+    nav = st.session_state.get("_nav_widget", current_nav)
+    if nav not in menu_options:
+        nav = menu_options[0]
+    if st.session_state.get("nav") != nav:
+        st.session_state["nav"] = nav
     sidebar.divider()
     with sidebar.expander("モード別の使い方ガイド", expanded=False):
         st.markdown(
