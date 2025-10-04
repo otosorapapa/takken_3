@@ -1623,21 +1623,143 @@ class DBManager:
         return df
 
     def initialize_from_csv(self) -> None:
+        def _read_dataframe(file_path: Path) -> Optional[pd.DataFrame]:
+            suffix = file_path.suffix.lower()
+            try:
+                if suffix == ".csv":
+                    last_error: Optional[Exception] = None
+                    for encoding in ("utf-8-sig", "utf-8", "cp932"):
+                        try:
+                            df = pd.read_csv(file_path, encoding=encoding)
+                            break
+                        except UnicodeDecodeError as exc:
+                            last_error = exc
+                            continue
+                    else:
+                        if last_error:
+                            raise last_error
+                elif suffix in {".xlsx", ".xls", ".xlsm"}:
+                    df = pd.read_excel(file_path)
+                else:
+                    return None
+            except Exception as exc:
+                logger.warning("Failed to read %s: %s", file_path, exc)
+                return None
+
+            if df is None:
+                return None
+            df = df.copy()
+            cleaned_columns = []
+            for col in df.columns:
+                col_name = str(col).strip().lstrip("\ufeff")
+                cleaned_columns.append(col_name)
+            df.columns = cleaned_columns
+            drop_columns = [
+                col
+                for col in df.columns
+                if not str(col).strip() or str(col).lower().startswith("unnamed") or df[col].isna().all()
+            ]
+            if drop_columns:
+                df = df.drop(columns=drop_columns)
+            df = df.dropna(how="all")
+            return df
+
+        def _normalize_column_name(value: str) -> str:
+            return str(value).strip().lstrip("\ufeff").lower()
+
+        def _classify_dataset(file_path: Path, df: pd.DataFrame) -> Optional[str]:
+            columns = {_normalize_column_name(col) for col in df.columns}
+            stem = file_path.stem.lower()
+            predicted_hints = {"predicted", "yosou", "yosoumondai", "forecast"}
+            has_question_choices = {"question", "choice1", "choice2", "choice3", "choice4"}.issubset(columns)
+
+            if any(hint in stem for hint in predicted_hints) and has_question_choices:
+                return "predicted"
+            if "law_name" in columns and has_question_choices:
+                return "law_revision"
+            if {"auto_summary", "auto_cloze"} & columns and has_question_choices:
+                return "predicted"
+            if "correct" in columns and not {"correct_number", "correct_label", "correct_text"} & columns and has_question_choices:
+                return "predicted"
+            if {"correct_number", "correct_label", "correct_text"} & columns:
+                return "answers"
+            if has_question_choices and {"year", "q_no"}.issubset(columns):
+                return "questions"
+            if has_question_choices:
+                return "predicted"
+            return None
+
+        def _concat_frames(frames: List[pd.DataFrame]) -> Optional[pd.DataFrame]:
+            if not frames:
+                return None
+            combined = pd.concat(frames, ignore_index=True)
+            combined = combined.dropna(how="all")
+            return combined if not combined.empty else None
+
+        question_frames: List[pd.DataFrame] = []
+        answer_frames: List[pd.DataFrame] = []
+        predicted_frames: List[pd.DataFrame] = []
+        law_revision_frames: List[pd.DataFrame] = []
+
+        for file_path in sorted(DATA_DIR.glob("**/*")):
+            if not file_path.is_file():
+                continue
+            df = _read_dataframe(file_path)
+            if df is None or df.empty:
+                continue
+            dataset_type = _classify_dataset(file_path, df)
+            if dataset_type == "questions":
+                question_frames.append(df)
+            elif dataset_type == "answers":
+                answer_frames.append(df)
+            elif dataset_type == "predicted":
+                predicted_frames.append(df)
+            elif dataset_type == "law_revision":
+                law_revision_frames.append(df)
+
+        questions_df = _concat_frames(question_frames)
+        answers_df = _concat_frames(answer_frames)
+        predicted_df = _concat_frames(predicted_frames)
+        law_revision_df = _concat_frames(law_revision_frames)
+
         with self.engine.connect() as conn:
-            existing = conn.execute(select(func.count()).select_from(questions_table)).scalar()
-        if existing and existing > 0:
-            return
-        questions_path = DATA_DIR / "questions_sample.csv"
-        answers_path = DATA_DIR / "answers_sample.csv"
-        if not questions_path.exists() or not answers_path.exists():
-            return
-        df_q = pd.read_csv(questions_path)
-        df_a = pd.read_csv(answers_path)
-        df_q = normalize_questions(df_q)
-        df_a = normalize_answers(df_a)
-        merged, *_ = merge_questions_answers(df_q, df_a, policy={"explanation": "overwrite", "tags": "merge"})
-        self.upsert_questions(merged)
-        rebuild_tfidf_cache()
+            question_count = conn.execute(select(func.count()).select_from(questions_table)).scalar() or 0
+            predicted_count = conn.execute(select(func.count()).select_from(predicted_questions_table)).scalar() or 0
+            law_revision_count = conn.execute(select(func.count()).select_from(law_revision_questions_table)).scalar() or 0
+
+        if question_count == 0 and questions_df is not None:
+            try:
+                normalized_questions = normalize_questions(questions_df)
+                if answers_df is not None:
+                    normalized_answers = normalize_answers(answers_df)
+                    merged, *_ = merge_questions_answers(
+                        normalized_questions,
+                        normalized_answers,
+                        policy={"explanation": "overwrite", "tags": "merge"},
+                    )
+                else:
+                    merged = normalized_questions
+                if not merged.empty:
+                    self.upsert_questions(merged)
+                    rebuild_tfidf_cache()
+            except Exception as exc:
+                logger.warning("Failed to initialize questions from data directory: %s", exc)
+
+        if predicted_count == 0 and predicted_df is not None:
+            try:
+                normalized_predicted = normalize_predicted_questions(predicted_df)
+                if not normalized_predicted.empty:
+                    self.upsert_predicted_questions(normalized_predicted)
+            except Exception as exc:
+                logger.warning("Failed to initialize predicted questions from data directory: %s", exc)
+
+        if law_revision_count == 0 and law_revision_df is not None:
+            try:
+                normalized_law_revision = normalize_law_revision_questions(law_revision_df)
+                if not normalized_law_revision.empty:
+                    self.upsert_law_revision_questions(normalized_law_revision)
+            except Exception as exc:
+                logger.warning("Failed to initialize law revision questions from data directory: %s", exc)
 
 
 @st.cache_data(show_spinner=False)
