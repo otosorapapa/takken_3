@@ -10,3 +10,4 @@ requests
 spacy
 pytest
 ruff
+ics>=0.7
