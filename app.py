@@ -1337,11 +1337,11 @@ class DBManager:
                     ).scalars()
                 )
             for rec in records:
-                rec_id = rec.get("id")
+                rec_id = self._normalize_record_id(rec.get("id"))
                 payload = self._normalize_payload(
                     {k: v for k, v in rec.items() if k != "id"}
                 )
-                if rec_id in existing_ids:
+                if rec_id and rec_id in existing_ids:
                     conn.execute(
                         update(law_revision_questions_table)
                         .where(law_revision_questions_table.c.id == rec_id)
@@ -1349,14 +1349,15 @@ class DBManager:
                     )
                     updated += 1
                 else:
+                    if not rec_id:
+                        rec_id = str(uuid.uuid4())
                     conn.execute(
                         sa_insert(law_revision_questions_table).values(
-                            **self._normalize_payload(rec)
+                            id=rec_id, **payload
                         )
                     )
                     inserted += 1
-                    if rec_id:
-                        existing_ids.add(rec_id)
+                    existing_ids.add(rec_id)
         return inserted, updated
 
     def update_law_revision_review_status(
