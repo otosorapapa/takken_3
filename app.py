@@ -4198,11 +4198,19 @@ def register_keyboard_shortcuts(mapping: Dict[str, str]) -> None:
                 }
                 const doc = window.parent ? window.parent.document : document;
                 const buttons = doc.querySelectorAll('button');
+                const normalizedLabel = label ? label.trim() : '';
+                if (!normalizedLabel) {
+                    return;
+                }
                 for (const btn of buttons) {
                     if (!btn.innerText) {
                         continue;
                     }
-                    if (btn.innerText.trim().startsWith(label.trim())) {
+                    const buttonLabel = btn.innerText.trim();
+                    if (!buttonLabel) {
+                        continue;
+                    }
+                    if (buttonLabel === normalizedLabel || buttonLabel.startsWith(normalizedLabel)) {
                         event.preventDefault();
                         btn.click();
                         break;
@@ -6589,6 +6597,12 @@ def render_question_interaction(
         shortcut_lines.append("- R: SRSリセット")
     if navigation:
         shortcut_lines.append(f"- N/P: {nav_next_label}・{nav_prev_label}")
+        if navigation.has_next:
+            shortcut_lines.append(f"- Enter: {nav_next_label}")
+        else:
+            shortcut_lines.append(f"- Enter: {grade_label}")
+    else:
+        shortcut_lines.append(f"- Enter: {grade_label}")
     shortcut_lines.append(f"- H: {shortcut_help_label} を開閉")
     caption_cols = st.columns([6, 1])
     with caption_cols[0]:
@@ -6800,9 +6814,13 @@ def render_question_interaction(
     shortcut_map["h"] = shortcut_help_label
     if enable_srs:
         shortcut_map["r"] = "SRSリセット"
+    enter_target = grade_label
     if navigation:
         shortcut_map["n"] = nav_next_label
         shortcut_map["p"] = nav_prev_label
+        if navigation.has_next:
+            enter_target = nav_next_label
+    shortcut_map["enter"] = enter_target
     register_keyboard_shortcuts(shortcut_map)
 
 
