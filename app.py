@@ -132,6 +132,88 @@ CSV_IMPORT_GUIDE_KEYS = [
     "csv_import.guide.step5",
 ]
 
+LEARNING_SUMMARY_LABEL_KEYS = {
+    "objective": "learning.meta.label.objective",
+    "audience": "learning.meta.label.audience",
+    "duration": "learning.meta.label.duration",
+}
+
+LEARNING_TAB_META: Dict[str, Dict[str, str]] = {
+    "本試験モード": {
+        "objective": "learning.meta.full_exam.objective",
+        "audience": "learning.meta.full_exam.audience",
+        "duration": "learning.meta.full_exam.duration",
+    },
+    "適応学習": {
+        "objective": "learning.meta.adaptive.objective",
+        "audience": "learning.meta.adaptive.audience",
+        "duration": "learning.meta.adaptive.duration",
+    },
+    "分野別ドリル": {
+        "objective": "learning.meta.subject_drill.objective",
+        "audience": "learning.meta.subject_drill.audience",
+        "duration": "learning.meta.subject_drill.duration",
+    },
+    "年度別演習": {
+        "objective": "learning.meta.year_drill.objective",
+        "audience": "learning.meta.year_drill.audience",
+        "duration": "learning.meta.year_drill.duration",
+    },
+    "法改正対策": {
+        "objective": "learning.meta.law_revision.objective",
+        "audience": "learning.meta.law_revision.audience",
+        "duration": "learning.meta.law_revision.duration",
+    },
+    "予想問題演習": {
+        "objective": "learning.meta.predicted.objective",
+        "audience": "learning.meta.predicted.audience",
+        "duration": "learning.meta.predicted.duration",
+    },
+    "弱点分析": {
+        "objective": "learning.meta.weakness.objective",
+        "audience": "learning.meta.weakness.audience",
+        "duration": "learning.meta.weakness.duration",
+    },
+    "SRS復習": {
+        "objective": "learning.meta.srs.objective",
+        "audience": "learning.meta.srs.audience",
+        "duration": "learning.meta.srs.duration",
+    },
+}
+
+
+def render_learning_summary(tab_label: str) -> None:
+    meta = LEARNING_TAB_META.get(tab_label)
+    if not meta:
+        return
+
+    items = []
+    for field, label_key in LEARNING_SUMMARY_LABEL_KEYS.items():
+        meta_key = meta.get(field)
+        if not meta_key:
+            continue
+        label = t(label_key)
+        value = t(meta_key)
+        items.append(
+            "<li style=\"margin-bottom:0.35rem;\">"
+            f"<strong>{html_module.escape(label)}</strong><br>"
+            f"{html_module.escape(value)}"
+            "</li>"
+        )
+
+    if not items:
+        return
+
+    list_html = (
+        "<ul class=\"learning-summary-card\" "
+        "style=\"list-style:none;padding-left:0;margin-bottom:0.75rem;\">"
+        + "".join(items)
+        + "</ul>"
+    )
+
+    with st.container():
+        st.markdown(list_html, unsafe_allow_html=True)
+
 
 def build_csv_import_guide_markdown() -> str:
     bullet_lines = "\n".join(f"- {t(key)}" for key in CSV_IMPORT_GUIDE_KEYS)
@@ -4342,6 +4424,16 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
 
 def render_learning(db: DBManager, df: pd.DataFrame) -> None:
     st.title("学習")
+    attempts_summary = db.get_attempt_stats()
+    if attempts_summary.empty:
+        with st.container():
+            st.info(t("learning.first_time.info"))
+            st.button(
+                t("learning.first_time.button"),
+                key="learning_first_time_mock",
+                type="primary",
+                on_click=with_rerun(navigate_to, "模試"),
+            )
     if df.empty:
         st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
         return
@@ -4349,24 +4441,32 @@ def render_learning(db: DBManager, df: pd.DataFrame) -> None:
     with primary_tabs[0]:
         plan_tabs = st.tabs(["本試験モード", "適応学習", "分野別ドリル", "年度別演習"])
         with plan_tabs[0]:
+            render_learning_summary("本試験モード")
             render_full_exam_lane(db, df)
         with plan_tabs[1]:
+            render_learning_summary("適応学習")
             render_adaptive_lane(db, df)
         with plan_tabs[2]:
+            render_learning_summary("分野別ドリル")
             render_subject_drill_lane(db, df)
         with plan_tabs[3]:
+            render_learning_summary("年度別演習")
             render_year_drill_lane(db, df)
     with primary_tabs[1]:
         special_tabs = st.tabs(["法改正対策", "予想問題演習"])
         with special_tabs[0]:
+            render_learning_summary("法改正対策")
             render_law_revision_lane(db, parent_nav="学習")
         with special_tabs[1]:
+            render_learning_summary("予想問題演習")
             render_predicted_lane(db, parent_nav="学習")
     with primary_tabs[2]:
         review_tabs = st.tabs(["弱点分析", "SRS復習"])
         with review_tabs[0]:
+            render_learning_summary("弱点分析")
             render_weakness_lane(db, df)
         with review_tabs[1]:
+            render_learning_summary("SRS復習")
             render_srs(db, parent_nav="学習")
     st.divider()
     render_outline_notes_overview(db, df)
