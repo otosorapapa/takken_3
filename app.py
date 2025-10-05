@@ -4870,8 +4870,119 @@ def render_weakness_lane(db: DBManager, df: pd.DataFrame) -> None:
         1,
         0,
     )
-    merged = summary.merge(df[["id", "year", "q_no", "question"]], left_on="question_id", right_on="id", how="left")
+    merged = summary.merge(
+        df[["id", "year", "q_no", "question"]],
+        left_on="question_id",
+        right_on="id",
+        how="left",
+    )
     merged = merged.sort_values(["priority", "accuracy"], ascending=[False, True])
+    merged["question_id"] = merged["question_id"].astype(str)
+
+    queue_ids: Optional[List[str]] = st.session_state.get("weakness_lane_queue")
+    if queue_ids is not None and not queue_ids:
+        st.warning("週間プランから受け取ったキューに一致する問題がありません。再度送信してください。")
+        st.session_state.pop("weakness_lane_queue", None)
+        st.session_state.pop("weakness_lane_queue_label", None)
+        queue_ids = None
+    if queue_ids:
+        queue_ids = [qid for qid in queue_ids if qid in merged["question_id"].tolist()]
+    queue_label = st.session_state.get("weakness_lane_queue_label", "SRSプラン")
+    if queue_ids:
+        st.markdown("#### 週間プランからのクイック復習")
+        st.info(f"SRS週間プランから {len(queue_ids)} 問の復習キューを読み込みました。上から順に取り組みましょう。")
+
+        queue_df = merged[merged["question_id"].isin(queue_ids)].copy()
+        if not queue_df.empty:
+            queue_df["order"] = pd.Categorical(queue_df["question_id"], categories=queue_ids, ordered=True)
+            queue_df = queue_df.sort_values("order")
+            preview = queue_df[[
+                "question_id",
+                "category",
+                "accuracy",
+                "attempts_count",
+                "avg_seconds",
+            ]].rename(
+                columns={
+                    "question_id": "問題ID",
+                    "category": "分野",
+                    "accuracy": "正答率",
+                    "attempts_count": "挑戦回数",
+                    "avg_seconds": "平均解答時間(秒)",
+                }
+            )
+            preview["正答率"] = (preview["正答率"].astype(float) * 100).round(0)
+            preview = preview.set_index("問題ID")
+            with st.expander("キューの中身", expanded=False):
+                st.dataframe(
+                    preview,
+                    width="stretch",
+                    column_config={
+                        "分野": st.column_config.TextColumn("分野"),
+                        "正答率": st.column_config.NumberColumn("正答率", format="%.0f%%"),
+                        "挑戦回数": st.column_config.NumberColumn("挑戦回数", format="%d"),
+                        "平均解答時間(秒)": st.column_config.NumberColumn(
+                            "平均解答時間(秒)",
+                            format="%.1f",
+                        ),
+                    },
+                )
+        else:
+            st.warning("キューに含まれる問題が現在の履歴に見つかりませんでした。")
+
+        queue_key = "weakness_lane_queue"
+
+        def advance_queue() -> None:
+            items = st.session_state.get(queue_key, [])
+            if items:
+                items.pop(0)
+            st.session_state[queue_key] = items
+
+        def clear_queue() -> None:
+            st.session_state.pop(queue_key, None)
+            st.session_state.pop("weakness_lane_queue_label", None)
+
+        queue_ids = st.session_state.get(queue_key, []) or []
+        if not queue_ids:
+            st.success("キューを完了しました。お疲れさまでした。")
+            st.button(
+                "キューを閉じる",
+                key="weakness_queue_close",
+                on_click=with_rerun(clear_queue),
+            )
+            return
+
+        current_qid = queue_ids[0]
+        current_label = format_question_label(df, current_qid)
+        st.caption(f"{queue_label}｜残り {len(queue_ids)} 問｜現在: {current_label}")
+        current_row_df = df[df["id"] == current_qid]
+        if current_row_df.empty:
+            st.warning("対象の問題データが見つかりませんでした。次の問題に進みます。")
+            st.button(
+                "次の問題に進む",
+                key="weakness_queue_skip_missing",
+                on_click=with_rerun(advance_queue),
+            )
+            return
+
+        current_row = current_row_df.iloc[0]
+        render_question_interaction(db, current_row, attempt_mode="weakness", key_prefix="weakness_queue")
+        action_cols = st.columns([1, 1])
+        with action_cols[0]:
+            st.button(
+                "次の問題へ",
+                key="weakness_queue_next",
+                type="primary",
+                on_click=with_rerun(advance_queue),
+            )
+        with action_cols[1]:
+            st.button(
+                "キューを終了",
+                key="weakness_queue_end",
+                on_click=with_rerun(clear_queue),
+            )
+        return
+
     st.markdown("#### 優先出題リスト")
     with st.expander("並び替え・フィルタ", expanded=False):
         category_options = sorted({str(cat) for cat in merged["category"].dropna()})
@@ -6112,15 +6223,112 @@ def render_mock_exam(db: DBManager, df: pd.DataFrame) -> None:
         display_exam_result(result)
 
 
+WEEKDAY_LABELS_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def build_weekly_srs_plan(db: DBManager) -> pd.DataFrame:
+    upcoming = db.get_due_srs(upcoming_days=7)
+    if upcoming.empty:
+        return upcoming
+
+    upcoming = upcoming.copy()
+    upcoming["due_date"] = pd.to_datetime(upcoming["due_date"], errors="coerce").dt.date
+
+    attempts = db.get_attempt_stats()
+    summary_columns = [
+        "question_id",
+        "attempts_count",
+        "correct_count",
+        "avg_seconds",
+        "last_attempt",
+        "accuracy",
+    ]
+    summary = pd.DataFrame(columns=summary_columns)
+    if not attempts.empty:
+        attempts = attempts.copy()
+        attempts["created_at"] = pd.to_datetime(attempts.get("created_at"), errors="coerce")
+        attempts["seconds"] = pd.to_numeric(attempts.get("seconds"), errors="coerce")
+        summary = (
+            attempts.groupby("question_id")
+            .agg(
+                attempts_count=("is_correct", "count"),
+                correct_count=("is_correct", "sum"),
+                avg_seconds=("seconds", "mean"),
+                last_attempt=("created_at", "max"),
+            )
+            .reset_index()
+        )
+        summary["accuracy"] = summary["correct_count"] / summary["attempts_count"].replace(0, np.nan)
+        summary = summary.fillna({"accuracy": 0.0, "avg_seconds": 0.0})
+
+    merged = upcoming.merge(summary, on="question_id", how="left")
+    today = dt.date.today()
+    due_in_series = pd.to_numeric(merged.get("due_in_days"), errors="coerce")
+    fallback_due = merged["due_date"].apply(
+        lambda value: (value - today).days if isinstance(value, dt.date) else np.nan
+    )
+    due_in_series = due_in_series.fillna(fallback_due.fillna(7))
+
+    accuracy_series = pd.to_numeric(merged.get("accuracy"), errors="coerce").clip(0, 1)
+    accuracy_series = accuracy_series.fillna(0.6)
+    avg_seconds_series = pd.to_numeric(merged.get("avg_seconds"), errors="coerce").fillna(60.0)
+
+    urgency = np.where(due_in_series <= 0, 3.0, np.maximum(0.0, 3.0 - due_in_series))
+    accuracy_penalty = (1.0 - accuracy_series) * 2.0
+    time_penalty = np.clip(avg_seconds_series / 90.0, 0.0, 2.0)
+    priority = accuracy_penalty + time_penalty + urgency
+
+    def _resolve_plan_date(row: pd.Series) -> dt.date:
+        due_date_value = row.get("due_date")
+        if isinstance(due_date_value, dt.date):
+            return due_date_value
+        due_in_value = row.get("due_in_days")
+        try:
+            due_in_int = int(due_in_value)
+        except (TypeError, ValueError):
+            due_in_int = 7
+        due_in_int = max(0, min(due_in_int, 7))
+        return today + dt.timedelta(days=due_in_int)
+
+    merged["priority_score"] = priority
+    merged["plan_date"] = merged.apply(_resolve_plan_date, axis=1)
+    merged["plan_date"] = merged["plan_date"].apply(lambda value: value if isinstance(value, dt.date) else today)
+
+    def _format_day_label(day_value: dt.date) -> str:
+        delta = (day_value - today).days
+        weekday = WEEKDAY_LABELS_JP[day_value.weekday()] if isinstance(day_value, dt.date) else "?"
+        if delta < 0:
+            prefix = f"期限超過({abs(delta)}日前)"
+        elif delta == 0:
+            prefix = "今日"
+        elif delta == 1:
+            prefix = "明日"
+        else:
+            prefix = f"{delta}日後"
+        return f"{prefix}｜{day_value.strftime('%m/%d')}({weekday})"
+
+    merged = merged.sort_values(["plan_date", "priority_score"], ascending=[True, False])
+    merged["day_rank"] = merged.groupby("plan_date").cumcount() + 1
+    merged["day_label"] = merged["plan_date"].apply(_format_day_label)
+    merged["accuracy"] = accuracy_series
+    merged["avg_seconds"] = avg_seconds_series
+    merged["due_in_days"] = due_in_series
+    merged["attempts_count"] = pd.to_numeric(merged.get("attempts_count"), errors="coerce").fillna(0).astype(int)
+    return merged
+
+
 def render_srs(db: DBManager, parent_nav: str = "学習") -> None:
     render_specialized_header(parent_nav, "弱点復習", "srs")
     st.subheader("弱点復習")
-    due_df = db.get_due_srs(upcoming_days=1)
+    weekly_plan = build_weekly_srs_plan(db)
+    due_df = weekly_plan[
+        weekly_plan["due_status"].isin(["overdue", "due_today", "due_tomorrow"])
+    ].copy() if not weekly_plan.empty else pd.DataFrame()
     sidebar_alert = st.sidebar.container()
     sidebar_alert.subheader("復習アラート")
 
-    if due_df.empty:
-        st.info("今日復習すべき問題はありません。")
+    if weekly_plan.empty:
+        st.info("今後1週間以内に予定された復習はありません。")
         sidebar_alert.success("期限が迫る復習はありません。")
         return
 
@@ -6133,7 +6341,7 @@ def render_srs(db: DBManager, parent_nav: str = "学習") -> None:
         "scheduled": "予定あり",
     }
 
-    status_counts = due_df["due_status"].value_counts().to_dict()
+    status_counts = weekly_plan["due_status"].value_counts().to_dict()
     overdue_count = int(status_counts.get("overdue", 0))
     today_count = int(status_counts.get("due_today", 0))
     tomorrow_count = int(status_counts.get("due_tomorrow", 0))
@@ -6150,45 +6358,128 @@ def render_srs(db: DBManager, parent_nav: str = "学習") -> None:
     if not any([overdue_count, today_count, tomorrow_count]):
         sidebar_alert.success("期限が迫る復習はありません。")
 
-    status_order = {"overdue": 0, "due_today": 1, "due_tomorrow": 2, "upcoming": 3, "unscheduled": 4, "scheduled": 5}
+    if due_df.empty:
+        st.info("今日・明日までに復習すべき問題はありません。下の週間プランをチェックしましょう。")
+    else:
+        status_order = {"overdue": 0, "due_today": 1, "due_tomorrow": 2}
 
-    def _normalize_due_date(value: Optional[dt.date]) -> dt.date:
-        if value is None or pd.isna(value):
-            return dt.date.max
-        if isinstance(value, pd.Timestamp):
-            return value.date()
-        return value
+        def _normalize_due_date(value: Optional[dt.date]) -> dt.date:
+            if value is None or pd.isna(value):
+                return dt.date.max
+            if isinstance(value, pd.Timestamp):
+                return value.date()
+            return value
 
-    due_df = due_df.copy()
-    due_df["_status_order"] = due_df["due_status"].map(lambda s: status_order.get(s, 99))
-    due_df["_due_order"] = due_df["due_date"].apply(_normalize_due_date)
-    due_df = due_df.sort_values(["_status_order", "_due_order"]).drop(columns=["_status_order", "_due_order"])
+        due_df = due_df.copy()
+        due_df["_status_order"] = due_df["due_status"].map(lambda s: status_order.get(s, 99))
+        due_df["_due_order"] = due_df["due_date"].apply(_normalize_due_date)
+        due_df = due_df.sort_values(["_status_order", "_due_order"]).drop(columns=["_status_order", "_due_order"])
 
-    for _, row in due_df.iterrows():
-        question_title = str(row.get("question", ""))
-        if len(question_title) > 40:
-            question_title = f"{question_title[:40]}..."
-        st.markdown(f"### {question_title}")
-        due_date = row.get("due_date")
-        due_display = due_date if pd.notna(due_date) else "未設定"
-        status_label = status_labels.get(row.get("due_status"), "")
-        st.write(f"分野: {row['category']} ｜ 期限: {due_display} ({status_label})")
-        grade = st.slider(
-            f"評価 ({row['question_id']})",
-            0,
-            5,
-            3,
-            help="5=完全に覚えた、0=全く覚えていない。評価に応じて次回復習日が変わります。",
-        )
-        if st.button(
-            "評価を保存",
-            key=f"srs_save_{row['question_id']}",
-            help="SM-2アルゴリズムに基づき次回の出題タイミングを更新します。",
-        ):
-            initial_ease = st.session_state["settings"].get("sm2_initial_ease", 2.5)
-            payload = sm2_update(row, grade, initial_ease=initial_ease)
-            db.upsert_srs(row["question_id"], payload)
-            st.success("SRSを更新しました")
+        for _, row in due_df.iterrows():
+            question_title = str(row.get("question", ""))
+            if len(question_title) > 40:
+                question_title = f"{question_title[:40]}..."
+            st.markdown(f"### {question_title}")
+            due_date = row.get("due_date")
+            due_display = due_date if pd.notna(due_date) else "未設定"
+            status_label = status_labels.get(row.get("due_status"), "")
+            st.write(f"分野: {row['category']} ｜ 期限: {due_display} ({status_label})")
+            grade = st.slider(
+                f"評価 ({row['question_id']})",
+                0,
+                5,
+                3,
+                help="5=完全に覚えた、0=全く覚えていない。評価に応じて次回復習日が変わります。",
+            )
+
+            def _save_grade(question_row: pd.Series, selected_grade: int) -> None:
+                initial_ease = st.session_state["settings"].get("sm2_initial_ease", 2.5)
+                payload = sm2_update(question_row, selected_grade, initial_ease=initial_ease)
+                db.upsert_srs(question_row["question_id"], payload)
+                st.success("SRSを更新しました")
+
+            st.button(
+                "評価を保存",
+                key=f"srs_save_{row['question_id']}",
+                help="SM-2アルゴリズムに基づき次回の出題タイミングを更新します。",
+                on_click=with_rerun(_save_grade, row, grade),
+            )
+
+    st.markdown("### 1週間の復習プラン")
+    plan_df = weekly_plan.copy()
+    if plan_df.empty:
+        st.info("表示できる週間プランがありません。学習履歴を増やしてみましょう。")
+        return
+
+    day_groups = list(plan_df.groupby(["plan_date", "day_label"], sort=False))
+    if not day_groups:
+        st.info("表示できる週間プランがありません。")
+        return
+
+    def _queue_for_weakness(question_ids: Sequence[str], label: str) -> None:
+        st.session_state["weakness_lane_queue"] = [str(qid) for qid in question_ids]
+        st.session_state["weakness_lane_queue_label"] = label
+
+    tab_labels = [f"{label}｜{len(group)}件" for (_, label), group in day_groups]
+    tabs = st.tabs(tab_labels)
+    for tab, ((plan_date, label), group) in zip(tabs, day_groups):
+        with tab:
+            st.caption(
+                f"{label} におすすめの復習候補です。正答率や解答時間を加味して優先度順に並べています。"
+            )
+            display = group[[
+                "day_rank",
+                "question",
+                "category",
+                "priority_score",
+                "accuracy",
+                "avg_seconds",
+                "attempts_count",
+                "due_status",
+            ]].rename(
+                columns={
+                    "day_rank": "順番",
+                    "question": "問題文",
+                    "category": "分野",
+                    "priority_score": "優先度",
+                    "accuracy": "正答率",
+                    "avg_seconds": "平均解答時間(秒)",
+                    "attempts_count": "挑戦回数",
+                    "due_status": "期限",
+                }
+            )
+            display["問題文"] = display["問題文"].apply(
+                lambda text: f"{str(text)[:60]}…" if isinstance(text, str) and len(text) > 60 else text
+            )
+            display["正答率"] = (display["正答率"].astype(float) * 100).round(0)
+            display = display.set_index("順番")
+            st.dataframe(
+                display,
+                width="stretch",
+                column_config={
+                    "問題文": st.column_config.TextColumn(
+                        "問題文",
+                        help="復習候補の冒頭を表示しています。全文は弱点モードで確認できます。",
+                        width="large",
+                    ),
+                    "優先度": st.column_config.NumberColumn("優先度", format="%.2f"),
+                    "正答率": st.column_config.NumberColumn("正答率", format="%.0f%%"),
+                    "平均解答時間(秒)": st.column_config.NumberColumn(
+                        "平均解答時間(秒)",
+                        format="%.1f",
+                        help="過去の挑戦でかかった平均秒数です。",
+                    ),
+                    "挑戦回数": st.column_config.NumberColumn("挑戦回数", format="%d"),
+                    "期限": st.column_config.TextColumn("期限", help="SRSで設定されている期限ステータスです。"),
+                },
+            )
+            question_ids = group.sort_values("day_rank")["question_id"].tolist()
+            st.button(
+                f"この日の{len(question_ids)}問を弱点モードで復習",
+                key=f"srs_queue_day_{plan_date}_{len(question_ids)}",
+                type="primary",
+                on_click=with_rerun(_queue_for_weakness, question_ids, label),
+            )
 
 
 def render_stats(db: DBManager, df: pd.DataFrame) -> None:
