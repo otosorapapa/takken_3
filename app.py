@@ -1,4 +1,6 @@
 import datetime as dt
+import itertools
+import math
 import hashlib
 import html as html_module
 import io
@@ -39,6 +41,7 @@ from law_updates import (DEFAULT_LAW_SOURCES, LawRevisionAnalyzer,
 from integrations import (GoogleCalendarClient, GoogleCalendarConfig,
                           IntegrationConfigError, IntegrationError,
                           NotionClient, NotionConfig, OAuthCredentials)
+from ics import Calendar, Event
 from translations import (DEFAULT_LANGUAGE, available_languages,
                           get_current_language, set_current_language, t)
 
@@ -4340,8 +4343,338 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
         st.dataframe(logs)
 
 
+def _parse_exam_date(raw_value: Optional[object]) -> Optional[dt.date]:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, dt.date):
+        return raw_value
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return None
+        try:
+            return dt.date.fromisoformat(text)
+        except ValueError:
+            return None
+    return None
+
+
+def build_learning_plan(
+    db: "DBManager",
+    exam_date: Optional[dt.date],
+    weekly_hours: Optional[float],
+    weekly_problems: Optional[int],
+) -> pd.DataFrame:
+    today = dt.date.today()
+    target_date = exam_date
+    if target_date is None or target_date <= today:
+        target_date = today + dt.timedelta(weeks=8)
+    weekly_hours_value = float(weekly_hours or 0)
+    if weekly_hours_value <= 0:
+        weekly_hours_value = 6.0
+    weekly_problem_goal = int(weekly_problems or 0)
+    if weekly_problem_goal <= 0:
+        weekly_problem_goal = 40
+
+    total_days = (target_date - today).days
+    weeks = max(1, math.ceil((total_days + 1) / 7))
+
+    attempts = db.get_attempt_stats()
+    if not attempts.empty and "category" in attempts.columns:
+        cat_summary = (
+            attempts.groupby("category")["is_correct"]
+            .agg(["mean", "count"])
+            .rename(columns={"mean": "accuracy"})
+        )
+        cat_summary["priority"] = 1 - cat_summary["accuracy"].fillna(0.0)
+        cat_summary = cat_summary.sort_values(
+            by=["priority", "count"], ascending=[False, False]
+        )
+        focus_categories = list(cat_summary.index)
+    else:
+        focus_categories = CATEGORY_CHOICES
+
+    if not focus_categories:
+        focus_categories = CATEGORY_CHOICES
+
+    due_window_days = weeks * 7
+    due_srs = db.get_due_srs(upcoming_days=due_window_days)
+    if due_srs.empty:
+        due_srs = pd.DataFrame(columns=["due_date", "category"])
+    else:
+        due_srs = due_srs.copy()
+        due_srs["due_date"] = pd.to_datetime(due_srs["due_date"], errors="coerce")
+        due_srs["category"] = due_srs["category"].fillna("総合")
+        due_srs["week_index"] = due_srs["due_date"].apply(
+            lambda value: 0
+            if pd.isna(value)
+            else min(
+                max(((value.date() - today).days // 7), 0),
+                weeks - 1,
+            )
+        )
+
+    schedule: List[Dict[str, object]] = []
+    category_cycle = itertools.cycle(focus_categories)
+
+    for week_index in range(weeks):
+        week_start = today + dt.timedelta(days=7 * week_index)
+        week_end = min(week_start + dt.timedelta(days=6), target_date)
+
+        due_slice = (
+            due_srs[due_srs.get("week_index", -1) == week_index]
+            if not due_srs.empty
+            else pd.DataFrame()
+        )
+        due_count = int(len(due_slice))
+        due_focus = ", ".join(due_slice["category"].value_counts().head(2).index)
+        if not due_focus:
+            due_focus = "総合"
+
+        srs_hours = 0.0
+        if due_count > 0:
+            srs_hours = min(2.0, round(weekly_hours_value * 0.3, 2))
+        elif weekly_hours_value >= 4:
+            srs_hours = round(weekly_hours_value * 0.15, 2)
+
+        law_hours = round(min(weekly_hours_value * 0.2, 1.5), 2)
+        mock_needed = weeks >= 3 and (week_index % 2 == 1 or week_index == weeks - 1)
+        mock_hours = 0.0
+        if mock_needed:
+            mock_hours = round(min(weekly_hours_value * 0.4, 3.0), 2)
+
+        drill_hours = weekly_hours_value - (srs_hours + law_hours + mock_hours)
+        if drill_hours < 1.0:
+            drill_hours = max(0.5, weekly_hours_value * 0.35)
+        drill_hours = round(drill_hours, 2)
+
+        drill_focus: List[str] = []
+        for _ in range(min(2, len(focus_categories))):
+            drill_focus.append(next(category_cycle))
+        drill_focus_text = "・".join(drill_focus) if drill_focus else "総合"
+
+        if srs_hours > 0:
+            schedule.append(
+                {
+                    "date": week_start,
+                    "title": "SRS復習ブロック",
+                    "type": "srs",
+                    "details": f"{due_focus} / {due_count}件の復習キューを処理",
+                    "estimated_hours": srs_hours,
+                    "items": due_count,
+                    "week_index": week_index,
+                }
+            )
+
+        drill_date = min(week_start + dt.timedelta(days=2), week_end)
+        schedule.append(
+            {
+                "date": drill_date,
+                "title": "分野別ドリル",
+                "type": "drill",
+                "details": f"重点分野: {drill_focus_text} / {weekly_problem_goal}問を目標",
+                "estimated_hours": drill_hours,
+                "items": weekly_problem_goal,
+                "week_index": week_index,
+            }
+        )
+
+        law_date = min(week_start + dt.timedelta(days=4), week_end)
+        schedule.append(
+            {
+                "date": law_date,
+                "title": "法改正キャッチアップ",
+                "type": "law_update",
+                "details": "最新の法改正記事・判例を確認しノートを更新",
+                "estimated_hours": law_hours,
+                "items": 0,
+                "week_index": week_index,
+            }
+        )
+
+        if mock_hours > 0:
+            mock_date = min(week_start + dt.timedelta(days=5), week_end)
+            schedule.append(
+                {
+                    "date": mock_date,
+                    "title": "模擬試験",
+                    "type": "mock_exam",
+                    "details": "120分の本試験シミュレーション＋振り返り",
+                    "estimated_hours": mock_hours,
+                    "items": 50,
+                    "week_index": week_index,
+                }
+            )
+
+    plan_df = pd.DataFrame(schedule)
+    if plan_df.empty:
+        return plan_df
+    plan_df["date"] = pd.to_datetime(plan_df["date"]).dt.date
+    plan_df = plan_df.sort_values(["date", "type"]).reset_index(drop=True)
+    return plan_df
+
+
+def render_learning_preferences_form() -> None:
+    st.subheader("学習プラン設定")
+    settings = st.session_state.setdefault("settings", {})
+    learning_settings = settings.setdefault("learning", {})
+
+    existing_exam = _parse_exam_date(learning_settings.get("exam_date"))
+    default_exam = existing_exam or (dt.date.today() + dt.timedelta(days=90))
+    weekly_hours_value = float(learning_settings.get("weekly_hours") or 6.0)
+    weekly_problem_goal = int(learning_settings.get("weekly_problems") or 40)
+
+    with st.form("learning_preferences_form"):
+        st.caption("本試験までの期間と学習リソースを入力すると週間プランを自動生成します。")
+        exam_date = st.date_input(
+            "本試験日",
+            value=default_exam,
+            min_value=dt.date.today(),
+            help="本試験の日付を指定すると週次プランの終了週が調整されます。",
+        )
+        weekly_hours = st.number_input(
+            "週あたりの学習時間 (時間)",
+            min_value=0.0,
+            max_value=168.0,
+            step=0.5,
+            value=float(round(weekly_hours_value, 1)),
+            help="学習に充てられる目安時間です。プラン作成時の配分に利用します。",
+        )
+        weekly_problems = st.number_input(
+            "週あたりの演習問題数",
+            min_value=0,
+            max_value=500,
+            step=5,
+            value=int(weekly_problem_goal),
+            help="分野別ドリルに設定する週間演習問題数の目標です。",
+        )
+        submitted = st.form_submit_button("学習プランを保存")
+
+    if submitted:
+        learning_settings.update(
+            {
+                "exam_date": exam_date.isoformat() if exam_date else None,
+                "weekly_hours": float(weekly_hours),
+                "weekly_problems": int(weekly_problems),
+            }
+        )
+        settings["learning"] = learning_settings
+        st.session_state["settings"] = settings
+        st.success("学習プランの設定を保存しました。")
+
+
+def render_learning_plan_overview(db: DBManager) -> None:
+    settings = st.session_state.get("settings", {})
+    learning_settings = settings.get("learning", {})
+    exam_date = _parse_exam_date(learning_settings.get("exam_date"))
+    weekly_hours = learning_settings.get("weekly_hours")
+    weekly_problems = learning_settings.get("weekly_problems")
+
+    plan_df = build_learning_plan(db, exam_date, weekly_hours, weekly_problems)
+    st.subheader("週間プランナー")
+
+    if plan_df.empty:
+        st.info("学習データが少ないためプランを生成できませんでした。演習履歴を追加してください。")
+        return
+
+    display_df = plan_df.copy()
+    display_df["date"] = pd.to_datetime(display_df["date"])
+    display_df["week_start"] = display_df["date"] - pd.to_timedelta(
+        display_df["date"].dt.weekday, unit="d"
+    )
+    display_df["weekday_label"] = display_df["date"].dt.strftime("%a (%m/%d)")
+
+    def _format_row(row: pd.Series) -> str:
+        parts = [str(row.get("title", ""))]
+        detail = row.get("details")
+        if detail:
+            parts.append(str(detail))
+        hours = row.get("estimated_hours")
+        if hours and float(hours) > 0:
+            parts.append(f"所要 {float(hours):.1f} 時間")
+        items = row.get("items")
+        if items and int(items) > 0:
+            parts.append(f"目標 {int(items)} 件")
+        return "\n".join(parts)
+
+    display_df["display"] = display_df.apply(_format_row, axis=1)
+    calendar_table = (
+        display_df.pivot_table(
+            index="week_start",
+            columns="weekday_label",
+            values="display",
+            aggfunc=lambda values: "\n\n".join(str(v) for v in values if v),
+        )
+        .fillna("")
+        .sort_index()
+    )
+    calendar_table.index = calendar_table.index.strftime("%Y-%m-%d 週")
+    st.dataframe(calendar_table, use_container_width=True)
+
+    st.caption("上記表は曜日ごとに主要タスクを配置した週間カレンダーです。")
+
+    events_df = plan_df.copy()
+    events_df["due_date"] = pd.to_datetime(events_df["date"]).dt.date
+    events_df["category"] = events_df["title"]
+
+    def _build_description(row: pd.Series) -> str:
+        base = [str(row.get("details", ""))]
+        hours = row.get("estimated_hours")
+        if hours and float(hours) > 0:
+            base.append(f"想定学習時間: {float(hours):.1f} 時間")
+        items = row.get("items")
+        if items and int(items) > 0:
+            base.append(f"目標: {int(items)} 件")
+        return "\n".join(part for part in base if part)
+
+    events_df["question"] = events_df.apply(_build_description, axis=1)
+
+    google_client = GoogleCalendarClient(
+        GoogleCalendarConfig(credentials=OAuthCredentials())
+    )
+    try:
+        google_events = google_client.build_events(
+            events_df[["due_date", "category", "question"]],
+            limit=len(events_df),
+        )
+    except IntegrationError as exc:
+        google_events = []
+        st.warning(f"Google Calendar用イベントの生成に失敗しました: {exc}")
+
+    if google_events:
+        google_payload = json.dumps(google_events, ensure_ascii=False, indent=2)
+        st.download_button(
+            "Google Calendar 用イベントJSONをダウンロード",
+            data=google_payload.encode("utf-8"),
+            file_name="learning_plan_google_events.json",
+            mime="application/json",
+        )
+
+    calendar = Calendar()
+    for row in plan_df.itertuples():
+        start_datetime = dt.datetime.combine(row.date, dt.time(hour=9))
+        duration = max(float(getattr(row, "estimated_hours", 1.0) or 1.0), 0.5)
+        end_datetime = start_datetime + dt.timedelta(hours=duration)
+        event = Event()
+        event.name = getattr(row, "title", "学習セッション")
+        event.begin = start_datetime
+        event.end = end_datetime
+        event.description = getattr(row, "details", "")
+        calendar.events.add(event)
+
+    ics_bytes = calendar.serialize().encode("utf-8")
+    st.download_button(
+        "ICSファイルをダウンロード",
+        data=ics_bytes,
+        file_name="learning_plan.ics",
+        mime="text/calendar",
+    )
+
+
 def render_learning(db: DBManager, df: pd.DataFrame) -> None:
     st.title("学習")
+    render_learning_preferences_form()
+    render_learning_plan_overview(db)
     if df.empty:
         st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
         return
