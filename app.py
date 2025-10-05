@@ -6271,6 +6271,32 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
     if filtered.empty:
         st.info("データが不足しています")
         return
+
+    weekly_stats: Optional[pd.DataFrame]
+    created_series = pd.to_datetime(filtered.get("created_at"), errors="coerce")
+    if created_series.isna().all():
+        weekly_stats = None
+    else:
+        weekly_df = filtered.copy()
+        weekly_df["created_at"] = created_series
+        weekly_df = weekly_df.dropna(subset=["created_at", "category"])
+        if weekly_df.empty:
+            weekly_stats = None
+        else:
+            weekly_df["week_start"] = weekly_df["created_at"].dt.to_period("W").dt.start_time
+            weekly_stats = (
+                weekly_df.groupby(["category", "week_start"])
+                .agg(
+                    attempts=("is_correct", "count"),
+                    accuracy=("is_correct", "mean"),
+                    avg_seconds=("seconds", "mean"),
+                )
+                .reset_index()
+            )
+            if not weekly_stats.empty:
+                weekly_stats["week_start"] = pd.to_datetime(weekly_stats["week_start"])
+                weekly_stats["accuracy_pct"] = (weekly_stats["accuracy"] * 100).round(1)
+                weekly_stats["avg_seconds"] = weekly_stats["avg_seconds"].astype(float)
     analysis_key = "_stats_root_cause_report"
     stored_report = st.session_state.get(analysis_key)
     analysis_report: Optional[Dict[str, object]]
@@ -6341,6 +6367,99 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
     render_app_card_grid(summary_cards)
 
     import altair as alt
+
+    st.markdown("### 週次カテゴリ別トレンド")
+    if not isinstance(weekly_stats, pd.DataFrame) or weekly_stats.empty:
+        st.info("週次の集計を表示するには、少なくとも1件以上の演習履歴が必要です。")
+    else:
+        recent_weeks = weekly_stats.sort_values("week_start")
+        week_labels = recent_weeks["week_start"].dt.strftime("%Y-%m-%d")
+        heatmap_source = recent_weeks.assign(week_label=week_labels)
+        heatmap_caption = "色の濃いセルほど正答率が高く、白に近づくほど弱点傾向です。"
+        try:
+            heatmap_chart = (
+                alt.Chart(heatmap_source)
+                .mark_rect()
+                .encode(
+                    x=alt.X("week_start:T", title="週 (開始日)", axis=alt.Axis(format="%m/%d")),
+                    y=alt.Y("category:N", title="分野"),
+                    color=alt.Color(
+                        "accuracy:Q",
+                        title="正答率",
+                        scale=alt.Scale(domain=[0, 1], clamp=True, scheme="redblue"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("category", title="分野"),
+                        alt.Tooltip("week_label", title="週"),
+                        alt.Tooltip("accuracy_pct", title="正答率", format=".1f"),
+                        alt.Tooltip("attempts", title="挑戦回数"),
+                        alt.Tooltip("avg_seconds", title="平均解答時間", format=".1f"),
+                    ],
+                )
+                .properties(width="container")
+                .configure_view(strokeWidth=0)
+            )
+            label_chart = (
+                alt.Chart(heatmap_source)
+                .mark_text(color="white", fontSize=11)
+                .encode(
+                    x="week_start:T",
+                    y="category:N",
+                    text=alt.Text("accuracy_pct:Q", format=".0f"),
+                )
+            )
+            st.altair_chart(heatmap_chart + label_chart, use_container_width=True)
+            st.caption(heatmap_caption)
+        except Exception as exc:
+            st.warning(f"週次ヒートマップを表示できませんでした ({exc})")
+        threshold = 70.0
+        latest_week = weekly_stats["week_start"].max()
+        latest_metrics = weekly_stats[weekly_stats["week_start"] == latest_week].copy()
+        action_candidates = (
+            latest_metrics[latest_metrics["attempts"] >= 3]
+            .sort_values(["accuracy", "attempts"], ascending=[True, False])
+        )
+        st.markdown("#### 次のアクション")
+        if action_candidates.empty:
+            st.info("直近週のデータが不足しているため、推奨アクションを提示できません。")
+        else:
+            next_actions = []
+            for _, row in action_candidates.head(3).iterrows():
+                accuracy_pct = row.get("accuracy_pct", np.nan)
+                attempts_count = int(row.get("attempts", 0))
+                category_label = str(row.get("category", ""))
+                caption = f"直近週 {attempts_count} 回挑戦"
+                if not np.isnan(accuracy_pct) and accuracy_pct < threshold:
+                    caption += f" ｜ 目標{threshold:.0f}%未満"
+                next_actions.append(
+                    {
+                        "title": category_label,
+                        "value": f"{accuracy_pct:.1f}%" if not np.isnan(accuracy_pct) else "--",
+                        "caption": caption,
+                    }
+                )
+            render_app_card_grid(next_actions)
+            low_categories = [
+                str(row.get("category", ""))
+                for _, row in action_candidates.iterrows()
+                if not np.isnan(row.get("accuracy_pct", np.nan)) and row.get("accuracy_pct", 0) < threshold
+            ]
+            if low_categories:
+                st.caption(
+                    f"推奨基準: 直近週の正答率が{threshold:.0f}%未満、挑戦回数3回以上の分野を優先しています。"
+                )
+            button_targets = action_candidates.head(2)
+            if not button_targets.empty:
+                button_cols = st.columns(len(button_targets))
+                for idx, (_, row) in enumerate(button_targets.iterrows()):
+                    category_label = str(row.get("category", ""))
+                    button_label = f"{category_label}を復習"
+                    if button_cols[idx].button(button_label, key=f"weekly_focus_{idx}", type="primary"):
+                        st.session_state["nav"] = "弱点復習"
+                        st.session_state["_nav_widget"] = "弱点復習"
+                        st.session_state["weakness_categories"] = [category_label]
+                        safe_rerun()
+                st.caption("ボタンから弱点復習モードへ移動し、対象分野に絞って学習を開始できます。")
 
     if isinstance(analysis_report, dict):
         report_dict = cast(Dict[str, object], analysis_report)
