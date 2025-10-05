@@ -5391,9 +5391,73 @@ def render_exam_session_body(
         remaining = max(0, 120 * 60 - int(elapsed.total_seconds()))
         minutes, seconds = divmod(remaining, 60)
         st.info(f"残り時間: {minutes:02d}:{seconds:02d}")
-    responses: Dict[str, int] = {}
-    choice_labels = ["①", "②", "③", "④"]
+    total = len(session.questions)
+    stored_responses: Dict[str, int] = {}
     for qid in session.questions:
+        stored_value = st.session_state.get(f"{key_prefix}_exam_{qid}")
+        if stored_value is not None:
+            stored_responses[qid] = stored_value
+    responses: Dict[str, int] = dict(stored_responses)
+    answered = len(stored_responses)
+    progress_value = answered / total if total else 0.0
+    remaining_questions = max(total - answered, 0)
+    focus_state_key = f"{key_prefix}_exam_focus"
+    focus_jump_key = f"{key_prefix}_exam_jump_target"
+
+    def _format_focus_option(option_qid: Optional[str]) -> str:
+        if option_qid is None:
+            return "全問表示"
+        row_df = df[df["id"] == option_qid]
+        if row_df.empty:
+            return str(option_qid)
+        row = row_df.iloc[0]
+        year_text = format_year_value(row.get("year")) or "年度不明"
+        qno_text = format_qno_value(row.get("q_no")) or "?"
+        return f"{year_text} 問{qno_text}"
+
+    def _handle_focus_change() -> None:
+        selected_qid = st.session_state.get(focus_state_key)
+        if selected_qid:
+            st.session_state[focus_jump_key] = selected_qid
+        else:
+            st.session_state.pop(focus_jump_key, None)
+
+    header_container = st.container()
+    with header_container:
+        progress_cols = st.columns([3, 2])
+        with progress_cols[0]:
+            st.progress(progress_value)
+            current_focus = st.session_state.get(focus_state_key)
+            if current_focus and current_focus in session.questions:
+                current_index = session.questions.index(current_focus) + 1
+                position_text = f"現在: {current_index}/{total}問"
+            else:
+                position_text = f"現在: 全{total}問を表示"
+            st.caption(f"{position_text}・残り{remaining_questions}問・回答済み{answered}問")
+        with progress_cols[1]:
+            focus_options: List[Optional[str]] = [None]
+            focus_options.extend(session.questions)
+            st.selectbox(
+                "設問を選択",
+                focus_options,
+                key=focus_state_key,
+                format_func=_format_focus_option,
+                on_change=_handle_focus_change,
+            )
+    jump_target = st.session_state.pop(focus_jump_key, None)
+    if jump_target:
+        st.markdown(
+            f"<a href='#exam-{jump_target}' id='{key_prefix}-exam-jump'></a>"
+            f"<script>document.getElementById('{key_prefix}-exam-jump').click();</script>",
+            unsafe_allow_html=True,
+        )
+    current_focus = st.session_state.get(focus_state_key)
+    if current_focus:
+        question_sequence: Sequence[str] = [current_focus]
+    else:
+        question_sequence = session.questions
+    choice_labels = ["①", "②", "③", "④"]
+    for qid in question_sequence:
         row_df = df[df["id"] == qid]
         if row_df.empty:
             continue
@@ -5411,6 +5475,7 @@ def render_exam_session_body(
             question_body = ""
         else:
             question_body = str(question_value)
+        st.markdown(f'<div id="exam-{qid}"></div>', unsafe_allow_html=True)
         question_container = st.container()
         with question_container:
             question_container.markdown(
