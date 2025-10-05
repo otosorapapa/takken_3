@@ -4797,8 +4797,112 @@ def render_outline_notes_overview(db: DBManager, df: pd.DataFrame) -> None:
     for missing in ["year", "q_no", "category", "topic"]:
         if missing not in notes_df.columns:
             notes_df[missing] = pd.NA
-    notes_df = notes_df.sort_values("updated_at", ascending=False)
-    notes_df["updated_at_display"] = notes_df["updated_at"].dt.strftime("%Y-%m-%d %H:%M")
+    keyword = st.text_input(
+        "キーワードで検索",
+        help="設問ID・要約・タグなどを含むキーワードで絞り込みます。",
+    ).strip()
+
+    category_values = [
+        str(value)
+        for value in notes_df.get("category", pd.Series(dtype="object")).dropna().unique()
+        if str(value).strip()
+    ]
+    category_values.sort()
+    tags_series = notes_df.get("tags", pd.Series(dtype="object")).fillna("").astype(str)
+    tag_values: Set[str] = set()
+    for entry in tags_series:
+        tag_values.update(tag.strip() for tag in entry.split(";") if tag.strip())
+    tag_choices = sorted(tag_values)
+
+    filter_options: List[Tuple[str, str]] = []
+    option_labels: Dict[Tuple[str, str], str] = {}
+    for category in category_values:
+        option = ("category", category)
+        filter_options.append(option)
+        option_labels[option] = f"分野: {category}"
+    for tag in tag_choices:
+        option = ("tag", tag)
+        filter_options.append(option)
+        option_labels[option] = f"タグ: {tag}"
+
+    selected_filters = st.multiselect(
+        "タグ/分野で絞り込み",
+        options=filter_options,
+        format_func=lambda option: option_labels.get(option, str(option)),
+        help="分野やタグを複数選択して表示するノートを絞り込みます。",
+    )
+
+    filtered_notes = notes_df.copy()
+
+    if keyword:
+        keyword_mask = pd.Series(False, index=filtered_notes.index)
+        searchable_columns = [
+            "question_id",
+            "summary",
+            "question_label",
+            "topic",
+            "category",
+            "tags",
+        ]
+        for column in searchable_columns:
+            if column not in filtered_notes.columns:
+                continue
+            keyword_mask |= (
+                filtered_notes[column]
+                .fillna("")
+                .astype(str)
+                .str.contains(keyword, case=False, regex=False)
+            )
+        filtered_notes = filtered_notes[keyword_mask]
+
+    selected_categories = {value for option_type, value in selected_filters if option_type == "category"}
+    selected_tags = {value for option_type, value in selected_filters if option_type == "tag"}
+
+    if selected_categories:
+        filtered_notes = filtered_notes[
+            filtered_notes.get("category", pd.Series(dtype="object")).isin(selected_categories)
+        ]
+
+    if selected_tags:
+        tags_for_filter = filtered_notes.get("tags", pd.Series(dtype="object")).fillna("").astype(str)
+
+        def contains_selected_tag(cell: str) -> bool:
+            cell_tags = {part.strip() for part in cell.split(";") if part.strip()}
+            return bool(cell_tags & selected_tags)
+
+        filtered_notes = filtered_notes[tags_for_filter.apply(contains_selected_tag)]
+
+    sort_option = st.selectbox(
+        "並び替え",
+        (
+            "更新日時（新しい順）",
+            "分野→更新日時",
+            "学習回数（多い順）",
+        ),
+        help="表示順序を選択します。",
+    )
+
+    if sort_option == "分野→更新日時":
+        filtered_notes = filtered_notes.sort_values(
+            by=["category", "updated_at"],
+            ascending=[True, False],
+            na_position="last",
+        )
+    elif sort_option == "学習回数（多い順）":
+        filtered_notes = filtered_notes.sort_values(
+            by=["attempts", "updated_at"],
+            ascending=[False, False],
+            na_position="last",
+        )
+    else:
+        filtered_notes = filtered_notes.sort_values(
+            by="updated_at",
+            ascending=False,
+            na_position="last",
+        )
+
+    filtered_notes = filtered_notes.copy()
+    filtered_notes["updated_at_display"] = filtered_notes["updated_at"].dt.strftime("%Y-%m-%d %H:%M")
     display_columns = {
         "question_id": "設問ID",
         "year": "年度",
@@ -4809,22 +4913,43 @@ def render_outline_notes_overview(db: DBManager, df: pd.DataFrame) -> None:
         "attempts": "学習回数",
         "updated_at_display": "更新日時",
     }
-    display_df = notes_df[list(display_columns.keys())].rename(columns=display_columns)
+    display_df = filtered_notes[list(display_columns.keys())].rename(columns=display_columns)
     st.dataframe(display_df, width="stretch")
+    if filtered_notes.empty:
+        st.info("条件に合致するアウトラインノートがありません。条件を変更してください。")
     st.caption("学習履歴の取り組み回数を併記しています。ノートとログの整合を確認できます。")
-    export_df = notes_df.copy()
-    export_df["law_references"] = export_df["law_references"].apply(
-        lambda value: json.dumps(value, ensure_ascii=False)
-        if isinstance(value, (list, dict))
-        else (value if value is not None else "[]")
-    )
-    export_df["updated_at"] = export_df["updated_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    buffer = io.StringIO()
-    export_df.to_csv(buffer, index=False)
+
+    def build_export_payload(source_df: pd.DataFrame) -> str:
+        export_df = source_df.copy()
+        if "law_references" in export_df.columns:
+            export_df["law_references"] = export_df["law_references"].apply(
+                lambda value: json.dumps(value, ensure_ascii=False)
+                if isinstance(value, (list, dict))
+                else (value if value is not None else "[]")
+            )
+        if "updated_at" in export_df.columns:
+            export_df["updated_at"] = pd.to_datetime(
+                export_df["updated_at"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d %H:%M:%S")
+        buffer = io.StringIO()
+        export_df.to_csv(buffer, index=False)
+        return buffer.getvalue()
+
     st.download_button(
-        "アウトラインノートをCSVエクスポート",
-        data=buffer.getvalue(),
-        file_name="outline_notes.csv",
+        "表示中のノートをCSVエクスポート",
+        data=build_export_payload(filtered_notes),
+        file_name="outline_notes_filtered.csv",
+        mime="text/csv",
+    )
+    all_notes_for_export = notes_df.sort_values(
+        by="updated_at",
+        ascending=False,
+        na_position="last",
+    )
+    st.download_button(
+        "全件のノートをCSVエクスポート",
+        data=build_export_payload(all_notes_for_export),
+        file_name="outline_notes_all.csv",
         mime="text/csv",
     )
 
