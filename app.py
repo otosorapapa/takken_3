@@ -402,6 +402,94 @@ def inject_style(css: str, style_id: str) -> None:
     st_html(script, height=0)
 
 
+def render_question_read_aloud_button(question_id: str, html_text: str) -> None:
+    """Render a read-aloud button for a question prompt."""
+
+    inject_style(
+        """
+.takken-tts-button-container {
+    margin: 0.5rem 0 0.25rem;
+}
+.takken-tts-button-container button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 48px;
+    padding: 0.5rem 1.25rem;
+    border-radius: 0.75rem;
+    border: none;
+    background: #4c6ef5;
+    color: #ffffff;
+    font-weight: 600;
+    cursor: pointer;
+}
+.takken-tts-button-container button:hover {
+    filter: brightness(0.95);
+}
+.takken-tts-button-container button:active {
+    filter: brightness(0.9);
+}
+        """,
+        style_id="takken-tts-style",
+    )
+
+    sanitized_text = re.sub(r"<[^>]+>", " ", html_text or "")
+    sanitized_text = re.sub(r"\s+", " ", sanitized_text).strip()
+
+    safe_question_id = re.sub(r"[^0-9A-Za-z_-]", "-", question_id or "question")
+    if not safe_question_id:
+        safe_question_id = "question"
+    button_id = f"takken-tts-{safe_question_id}"
+
+    button_id_attr = html_module.escape(button_id, quote=True)
+    button_id_js = json.dumps(button_id)
+    text_payload = json.dumps(sanitized_text)
+
+    st_html(
+        Template(
+            """
+<div class=\"takken-tts-button-container\">
+  <button id=\"$button_id\" type=\"button\">問題を読み上げる</button>
+</div>
+<script>
+(function() {
+    const buttonId = $button_id_js;
+    const text = $text_payload;
+    const doc = window.document;
+    const button = doc.getElementById(buttonId);
+    if (!button || button.dataset.speechBound === "true") {
+        return;
+    }
+    button.dataset.speechBound = "true";
+    button.addEventListener("click", function() {
+        if (!window.speechSynthesis) {
+            alert("音声読み上げはお使いのブラウザではサポートされていません。");
+            return;
+        }
+        const synth = window.speechSynthesis;
+        if (synth.speaking) {
+            synth.cancel();
+        }
+        if (!text) {
+            return;
+        }
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = "ja-JP";
+        synth.speak(utterance);
+    });
+})();
+</script>
+            """
+        ).substitute(
+            button_id=button_id_attr,
+            button_id_js=button_id_js,
+            text_payload=text_payload,
+        ),
+        height=70,
+    )
+
+
 def ensure_schema_migrations(engine: Engine) -> None:
     inspector = inspect(engine)
     with engine.begin() as conn:
@@ -5581,7 +5669,12 @@ def render_question_interaction(
         st.markdown(f"**{category_value}**")
     elif topic_value:
         st.markdown(f"**{topic_value}**")
-    st.markdown(row["question"], unsafe_allow_html=True)
+    raw_question_html = row.get("question", "")
+    if pd.isna(raw_question_html):
+        raw_question_html = ""
+    question_html = str(raw_question_html)
+    st.markdown(question_html, unsafe_allow_html=True)
+    render_question_read_aloud_button(str(row.get("id", "")), question_html)
     selected_choice = st.session_state.get(selected_key)
     graded_selected_choice: Optional[int] = None
     correct_choice_idx: Optional[int] = None
@@ -5961,7 +6054,9 @@ def render_question_preview(row: pd.Series, db: Optional[DBManager] = None) -> N
     question_text = row.get("question", "")
     if pd.isna(question_text):
         question_text = ""
-    st.markdown(str(question_text), unsafe_allow_html=True)
+    question_html = str(question_text)
+    st.markdown(question_html, unsafe_allow_html=True)
+    render_question_read_aloud_button(str(row.get("id", "")), question_html)
     choice_labels = ["①", "②", "③", "④"]
     for idx, label in enumerate(choice_labels, start=1):
         choice_text = row.get(f"choice{idx}")
