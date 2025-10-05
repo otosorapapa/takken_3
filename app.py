@@ -4678,22 +4678,21 @@ def render_learning_plan_overview(db: DBManager) -> None:
 
 def render_learning(db: DBManager, df: pd.DataFrame) -> None:
     st.title("学習")
-    render_learning_preferences_form()
-    render_learning_plan_overview(db)
-    if df.empty:
-        st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
-        return
+    data_available = not df.empty
     primary_tabs = st.tabs(["演習プラン", "特別対策", "弱点ケア"])
     with primary_tabs[0]:
-        plan_tabs = st.tabs(["本試験モード", "適応学習", "分野別ドリル", "年度別演習"])
-        with plan_tabs[0]:
-            render_full_exam_lane(db, df)
-        with plan_tabs[1]:
-            render_adaptive_lane(db, df)
-        with plan_tabs[2]:
-            render_subject_drill_lane(db, df)
-        with plan_tabs[3]:
-            render_year_drill_lane(db, df)
+        if not data_available:
+            st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
+        else:
+            plan_tabs = st.tabs(["本試験モード", "適応学習", "分野別ドリル", "年度別演習"])
+            with plan_tabs[0]:
+                render_full_exam_lane(db, df)
+            with plan_tabs[1]:
+                render_adaptive_lane(db, df)
+            with plan_tabs[2]:
+                render_subject_drill_lane(db, df)
+            with plan_tabs[3]:
+                render_year_drill_lane(db, df)
     with primary_tabs[1]:
         special_tabs = st.tabs(["法改正対策", "予想問題演習"])
         with special_tabs[0]:
@@ -4701,12 +4700,19 @@ def render_learning(db: DBManager, df: pd.DataFrame) -> None:
         with special_tabs[1]:
             render_predicted_lane(db, parent_nav="学習")
     with primary_tabs[2]:
-        review_tabs = st.tabs(["弱点分析", "SRS復習"])
-        with review_tabs[0]:
-            render_weakness_lane(db, df)
-        with review_tabs[1]:
-            render_srs(db, parent_nav="学習")
+        if not data_available:
+            st.warning("設問データがありません。『設定 ＞ データ入出力』からアップロードしてください。")
+        else:
+            review_tabs = st.tabs(["弱点分析", "SRS復習"])
+            with review_tabs[0]:
+                render_weakness_lane(db, df)
+            with review_tabs[1]:
+                render_srs(db, parent_nav="学習")
     st.divider()
+    render_learning_preferences_form()
+    render_learning_plan_overview(db)
+    if not data_available:
+        return
     render_outline_notes_overview(db, df)
 
 
