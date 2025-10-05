@@ -628,19 +628,20 @@ def build_theme_css(theme: str) -> str:
 :root {
     color-scheme: dark;
     --takken-color-bg: #1c1c1e;
-    --takken-color-bg-sidebar: rgba(28, 28, 30, 0.92);
-    --takken-color-surface: rgba(40, 40, 44, 0.96);
-    --takken-color-surface-elevated: rgba(52, 52, 58, 0.96);
-    --takken-color-border: rgba(255, 255, 255, 0.12);
-    --takken-color-text: #f5f5f7;
-    --takken-color-text-secondary: #c8cad7;
-    --takken-color-text-tertiary: #aeb1c1;
-    --takken-color-accent: #3395ff;
-    --takken-color-accent-soft: rgba(51, 149, 255, 0.24);
+    --takken-color-bg-sidebar: rgba(28, 28, 30, 0.9);
+    --takken-color-surface: rgba(44, 44, 46, 0.94);
+    --takken-color-surface-elevated: rgba(58, 58, 60, 0.96);
+    --takken-color-border: rgba(255, 255, 255, 0.08);
+    --takken-color-outline: rgba(10, 132, 255, 0.24);
+    --takken-color-text: #f2f2f7;
+    --takken-color-text-secondary: #d1d1d6;
+    --takken-color-text-tertiary: #8e8e93;
+    --takken-color-accent: #0a84ff;
+    --takken-color-accent-soft: rgba(10, 132, 255, 0.28);
     --takken-color-positive: #30d158;
     --takken-color-negative: #ff453a;
-    --takken-focus-ring: 0 0 0 3px rgba(51, 149, 255, 0.45);
-    --takken-shadow-strong: 0 24px 60px rgba(0, 0, 0, 0.55);
+    --takken-focus-ring: 0 0 0 3px rgba(10, 132, 255, 0.45);
+    --takken-shadow-strong: 0 24px 60px rgba(0, 0, 0, 0.6);
     --takken-radius-large: 18px;
 }
 body {
@@ -678,11 +679,11 @@ body {
 .stTabs [data-baseweb="tab"][aria-selected="true"] {
     background: var(--takken-color-accent-soft);
     color: var(--takken-color-text);
-    border-color: rgba(51, 149, 255, 0.45);
+    border-color: rgba(10, 132, 255, 0.45);
 }
 .stTabs [data-baseweb="tab"]:hover {
     color: var(--takken-color-text);
-    border-color: rgba(51, 149, 255, 0.32);
+    border-color: rgba(10, 132, 255, 0.32);
 }
 .stMetric,
 .stAlert,
@@ -704,9 +705,9 @@ body {
     padding: 1.1rem 1.2rem;
 }
 .home-dropzone-card {
-    background: rgba(51, 149, 255, 0.16);
-    border: 1px solid rgba(51, 149, 255, 0.5);
-    box-shadow: 0 22px 60px rgba(51, 149, 255, 0.3);
+    background: rgba(10, 132, 255, 0.18);
+    border: 1px solid rgba(10, 132, 255, 0.42);
+    box-shadow: 0 22px 60px rgba(10, 132, 255, 0.32);
 }
 .home-data-card {
     background: var(--takken-color-surface);
@@ -715,18 +716,18 @@ body {
 }
 .takken-choice-button button,
 .stButton > button {
-    background: linear-gradient(135deg, #3395ff 0%, #7dd4ff 100%);
+    background: linear-gradient(135deg, #0a84ff 0%, #64d2ff 100%);
     color: #ffffff;
     border: none;
     border-radius: 14px;
     font-weight: 600;
-    box-shadow: 0 16px 40px rgba(51, 149, 255, 0.34);
+    box-shadow: 0 16px 40px rgba(10, 132, 255, 0.36);
     transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.3s ease;
 }
 .takken-choice-button button:hover,
 .stButton > button:hover {
     transform: translateY(-1px);
-    box-shadow: 0 20px 48px rgba(51, 149, 255, 0.42);
+    box-shadow: 0 20px 48px rgba(10, 132, 255, 0.45);
 }
 .takken-choice-button button:focus,
 .stButton > button:focus {
@@ -734,13 +735,13 @@ body {
     box-shadow: var(--takken-focus-ring);
 }
 .takken-choice-button.is-correct button {
-    background: linear-gradient(135deg, #30d158 0%, #63e6b3 100%);
-    box-shadow: 0 18px 46px rgba(48, 209, 88, 0.32);
+    background: linear-gradient(135deg, #30d158 0%, #66ffa6 100%);
+    box-shadow: 0 18px 46px rgba(48, 209, 88, 0.34);
 }
 .takken-choice-button.is-incorrect button,
 .stButton > button.is-error {
     background: linear-gradient(135deg, #ff453a 0%, #ff9f0a 100%);
-    box-shadow: 0 18px 46px rgba(255, 69, 58, 0.3);
+    box-shadow: 0 18px 46px rgba(255, 69, 58, 0.32);
 }
 input[type="text"],
 input[type="number"],
@@ -776,7 +777,7 @@ label, legend {
     color: var(--takken-color-text-secondary);
 }
 code, pre {
-    background: rgba(40, 40, 44, 0.9);
+    background: rgba(44, 44, 46, 0.96);
     color: var(--takken-color-text);
     border-radius: 12px;
     border: 1px solid var(--takken-color-border);
@@ -788,7 +789,7 @@ code, pre {
 }
 [data-testid="stDataFrame"] table thead th,
 [data-testid="stTable"] table thead th {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.06);
     color: var(--takken-color-text-secondary);
     font-weight: 600;
 }
@@ -800,10 +801,10 @@ code, pre {
     background: var(--takken-color-accent);
 }
 .stProgress > div {
-    background: rgba(51, 149, 255, 0.16);
+    background: rgba(10, 132, 255, 0.22);
 }
 .stSlider > div > div > div[data-baseweb="slider"] > div:first-child {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.12);
 }
 .stSlider > div > div > div[data-baseweb="slider"] > div:nth-child(2) {
     background: var(--takken-color-accent);
@@ -822,6 +823,42 @@ code, pre {
 .stMarkdown p,
 .stMarkdown li {
     color: var(--takken-color-text-secondary);
+}
+.stMarkdown strong {
+    color: var(--takken-color-text);
+}
+.app-card {
+    background: var(--takken-color-surface);
+    border: 1px solid var(--takken-color-border);
+    box-shadow: var(--takken-shadow-strong);
+}
+.app-card-title {
+    color: var(--takken-color-text-secondary);
+}
+.app-card-value {
+    color: var(--takken-color-text);
+}
+.app-card-caption {
+    color: var(--takken-color-text-tertiary);
+}
+.app-question-card,
+.app-section-card,
+.app-chart-container {
+    background: var(--takken-color-surface);
+    border: 1px solid var(--takken-color-border);
+    box-shadow: var(--takken-shadow-strong);
+}
+.app-question-meta,
+.app-inline-kv span {
+    color: var(--takken-color-text-secondary);
+}
+.takken-feedback-summary {
+    background: rgba(10, 132, 255, 0.16);
+    color: var(--takken-color-text);
+    border: 1px solid var(--takken-color-outline);
+}
+.takken-feedback-summary strong {
+    color: var(--takken-color-text);
 }
 hr {
     border-color: var(--takken-color-border);
