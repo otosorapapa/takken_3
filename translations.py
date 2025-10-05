@@ -11,7 +11,7 @@ LANGUAGE_CHOICES: Iterable[str] = ("ja", "en")
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "ja": {
-        "app.title": "宅建10年ドリル",
+        "app.title": "宅建インサイト",
         "nav.menu": "メニュー",
         "nav.learning": "学習",
         "nav.mock_exam": "模試",
@@ -135,7 +135,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "data_io.sample.law_revision.help": "最新の法改正論点を整理した問題サンプルです。改正年度や施行日を追記してご利用ください。",
     },
     "en": {
-        "app.title": "Takken 10-Year Drill",
+        "app.title": "Takken Insight",
         "nav.menu": "Navigation",
         "nav.learning": "Learning",
         "nav.mock_exam": "Mock Exam",
