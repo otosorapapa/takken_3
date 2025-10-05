@@ -77,21 +77,32 @@ def render_app_card_grid(cards: Sequence[Dict[str, object]]) -> None:
     if not cards:
         return
 
-    card_html = "".join(
-        textwrap.dedent(
-            f"""
-            <div class=\"app-card\">
-                <div class=\"app-card-title\">{html_module.escape(str(card.get('title', '')))}
+    card_fragments: List[str] = []
+    for card in cards:
+        icon_html = ""
+        icon = card.get("icon")
+        if icon:
+            icon_html = (
+                f'<div class="app-card-icon" aria-hidden="true">'
+                f"{html_module.escape(str(icon))}"
+                "</div>"
+            )
+        card_fragments.append(
+            textwrap.dedent(
+                f"""
+                <div class=\"app-card\">
+                    {icon_html}
+                    <div class=\"app-card-title\">{html_module.escape(str(card.get('title', '')))}
+                    </div>
+                    <div class=\"app-card-value\">{html_module.escape(str(card.get('value', '')))}
+                    </div>
+                    <div class=\"app-card-caption\">{html_module.escape(str(card.get('caption', '')))}
+                    </div>
                 </div>
-                <div class=\"app-card-value\">{html_module.escape(str(card.get('value', '')))}
-                </div>
-                <div class=\"app-card-caption\">{html_module.escape(str(card.get('caption', '')))}
-                </div>
-            </div>
-            """
-        ).strip()
-        for card in cards
-    )
+                """
+            ).strip()
+        )
+    card_html = "".join(card_fragments)
     st.markdown(
         textwrap.dedent(
             f"""
@@ -831,6 +842,18 @@ code, pre {
     background: var(--takken-color-surface);
     border: 1px solid var(--takken-color-border);
     box-shadow: var(--takken-shadow-strong);
+}
+.app-card-icon {
+    font-size: 1.75rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 0.75rem;
+    background: rgba(10, 132, 255, 0.18);
+    color: var(--takken-color-text);
 }
 .app-card-title {
     color: var(--takken-color-text-secondary);
@@ -2973,6 +2996,18 @@ def inject_ui_styles() -> None:
     flex-direction: column;
     gap: 0.35rem;
 }
+.app-card-icon {
+    font-size: 1.75rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 0.75rem;
+    background: rgba(64, 138, 255, 0.12);
+    color: #3b6ff6;
+}
 .app-card-title {
     font-size: 0.9rem;
     font-weight: 600;
@@ -4345,16 +4380,19 @@ def render_home(db: DBManager, df: pd.DataFrame) -> None:
             "title": "設問数",
             "value": f"{total_questions:,}",
             "caption": "登録済みの設問件数",
+            "icon": "📚",
         },
         {
             "title": "学習履歴",
             "value": f"{attempt_count:,}",
             "caption": "記録された挑戦回数",
+            "icon": "📝",
         },
         {
             "title": "年度カバレッジ",
             "value": f"{coverage:.0f}%",
             "caption": "学習済みの年度比率",
+            "icon": "🗓️",
         },
     ]
     render_app_card_grid(summary_cards)
@@ -6243,21 +6281,25 @@ def display_exam_result(result: Dict[str, object]) -> None:
             "title": "得点",
             "value": f"{score} / {total}",
             "caption": "今回の獲得点数",
+            "icon": "🎯",
         },
         {
             "title": "正答率",
             "value": f"{accuracy * 100:.1f}%",
             "caption": "正解割合",
+            "icon": "📈",
         },
         {
             "title": "合格ライン",
             "value": f"{threshold} 点",
             "caption": f"合格基準 ({pass_line * 100:.0f}% 相当)",
+            "icon": "🏁",
         },
         {
             "title": "残り時間 / 想定到達点",
             "value": f"{remaining_minutes:02d}:{remaining_seconds:02d} ／ {result['expected_final']:.1f}点",
             "caption": "残余時間とペースから推計",
+            "icon": "⏱️",
         },
     ]
     render_app_card_grid(summary_cards)
@@ -7230,21 +7272,25 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
             "title": "挑戦回数",
             "value": f"{len(filtered):,} 回",
             "caption": "フィルタ適用後の挑戦数",
+            "icon": "🧮",
         },
         {
             "title": "平均正答率",
             "value": accuracy_text,
             "caption": "正解割合の平均値",
+            "icon": "📊",
         },
         {
             "title": "平均解答時間",
             "value": seconds_text,
             "caption": "1問あたりの平均秒数",
+            "icon": "⏳",
         },
         {
             "title": "平均確信度",
             "value": confidence_text,
             "caption": "自己評価スライダーの平均値",
+            "icon": "💡",
         },
     ]
     if isinstance(analysis_report, dict) and analysis_report.get("anomalies"):
@@ -7255,6 +7301,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                 "title": "要注意ポイント",
                 "value": preview_text or "検出なし",
                 "caption": "詳細は下部の原因分析タブで確認できます。",
+                "icon": "⚠️",
             }
         )
     render_app_card_grid(summary_cards)
@@ -7329,6 +7376,7 @@ def render_stats(db: DBManager, df: pd.DataFrame) -> None:
                         "title": category_label,
                         "value": f"{accuracy_pct:.1f}%" if not np.isnan(accuracy_pct) else "--",
                         "caption": caption,
+                        "icon": "📌",
                     }
                 )
             render_app_card_grid(next_actions)
