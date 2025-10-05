@@ -7752,6 +7752,18 @@ def render_data_io(db: DBManager, parent_nav: str = "設定") -> None:
     )
 
 
+def _sync_slider_to_number_input(slider_key: str, number_key: str) -> None:
+    """Copy the slider value into the paired number input state."""
+
+    st.session_state[number_key] = st.session_state[slider_key]
+
+
+def _sync_number_input_to_slider(slider_key: str, number_key: str) -> None:
+    """Copy the number input value into the paired slider state."""
+
+    st.session_state[slider_key] = st.session_state[number_key]
+
+
 def render_settings(db: DBManager) -> None:
     st.title(t("settings.title"))
     tabs = st.tabs([t("settings.tab.display"), t("settings.tab.data")])
@@ -7808,13 +7820,30 @@ def render_settings(db: DBManager) -> None:
         )
         sm2_key = "settings_sm2_initial_ease"
         current_sm2 = float(settings.get("sm2_initial_ease", 2.5))
+        sm2_manual_key = f"{sm2_key}_manual"
+        if sm2_key not in st.session_state:
+            st.session_state[sm2_key] = current_sm2
+        if sm2_manual_key not in st.session_state:
+            st.session_state[sm2_manual_key] = st.session_state[sm2_key]
         settings["sm2_initial_ease"] = st.slider(
             t("settings.sm2.label"),
             min_value=1.3,
             max_value=3.0,
-            value=current_sm2,
+            value=float(st.session_state[sm2_key]),
             help=t("settings.sm2.help"),
             key=sm2_key,
+            on_change=_sync_slider_to_number_input,
+            args=(sm2_key, sm2_manual_key),
+        )
+        st.number_input(
+            t("settings.sm2.label"),
+            min_value=1.3,
+            max_value=3.0,
+            value=float(st.session_state[sm2_key]),
+            step=0.1,
+            key=sm2_manual_key,
+            on_change=_sync_number_input_to_slider,
+            args=(sm2_key, sm2_manual_key),
         )
         settings["auto_advance"] = st.checkbox(
             t("settings.auto_advance"),
@@ -7823,23 +7852,57 @@ def render_settings(db: DBManager) -> None:
         )
         low_conf_key = "settings_review_low_confidence_threshold"
         current_low_conf = int(settings.get("review_low_confidence_threshold", 60))
+        low_conf_manual_key = f"{low_conf_key}_manual"
+        if low_conf_key not in st.session_state:
+            st.session_state[low_conf_key] = current_low_conf
+        if low_conf_manual_key not in st.session_state:
+            st.session_state[low_conf_manual_key] = st.session_state[low_conf_key]
         settings["review_low_confidence_threshold"] = st.slider(
             t("settings.review.low_confidence"),
             min_value=0,
             max_value=100,
-            value=current_low_conf,
+            value=int(st.session_state[low_conf_key]),
             help=t("settings.review.low_confidence.help"),
             key=low_conf_key,
+            on_change=_sync_slider_to_number_input,
+            args=(low_conf_key, low_conf_manual_key),
+        )
+        st.number_input(
+            t("settings.review.low_confidence"),
+            min_value=0,
+            max_value=100,
+            value=int(st.session_state[low_conf_key]),
+            step=1,
+            key=low_conf_manual_key,
+            on_change=_sync_number_input_to_slider,
+            args=(low_conf_key, low_conf_manual_key),
         )
         elapsed_key = "settings_review_elapsed_days"
         current_elapsed = int(settings.get("review_elapsed_days", 7))
+        elapsed_manual_key = f"{elapsed_key}_manual"
+        if elapsed_key not in st.session_state:
+            st.session_state[elapsed_key] = current_elapsed
+        if elapsed_manual_key not in st.session_state:
+            st.session_state[elapsed_manual_key] = st.session_state[elapsed_key]
         settings["review_elapsed_days"] = st.slider(
             t("settings.review.elapsed_days"),
             min_value=1,
             max_value=30,
-            value=current_elapsed,
+            value=int(st.session_state[elapsed_key]),
             help=t("settings.review.elapsed_days.help"),
             key=elapsed_key,
+            on_change=_sync_slider_to_number_input,
+            args=(elapsed_key, elapsed_manual_key),
+        )
+        st.number_input(
+            t("settings.review.elapsed_days"),
+            min_value=1,
+            max_value=30,
+            value=int(st.session_state[elapsed_key]),
+            step=1,
+            key=elapsed_manual_key,
+            on_change=_sync_number_input_to_slider,
+            args=(elapsed_key, elapsed_manual_key),
         )
         integrations = settings.setdefault("integrations", {})
         st.markdown("#### " + t("settings.integrations.heading"))
