@@ -425,6 +425,9 @@ def render_question_read_aloud_button(
         """
 .takken-tts-button-container {
     margin: 0.5rem 0 0.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
 }
 .takken-tts-button-container button {
     display: inline-flex;
@@ -439,12 +442,20 @@ def render_question_read_aloud_button(
     color: #ffffff;
     font-weight: 600;
     cursor: pointer;
+    transition: filter 0.2s ease, opacity 0.2s ease;
 }
 .takken-tts-button-container button:hover {
     filter: brightness(0.95);
 }
 .takken-tts-button-container button:active {
     filter: brightness(0.9);
+}
+.takken-tts-button-container button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+.takken-tts-button-container button.secondary {
+    background: #748ffc;
 }
         """,
         style_id="takken-tts-style",
@@ -471,52 +482,128 @@ def render_question_read_aloud_button(
     if not safe_question_id:
         safe_question_id = "question"
     button_id = f"takken-tts-{safe_question_id}"
+    container_id = f"{button_id}-container"
+    play_button_id = f"{button_id}-play"
+    pause_button_id = f"{button_id}-pause"
+    resume_button_id = f"{button_id}-resume"
 
-    button_id_attr = html_module.escape(button_id, quote=True)
-    button_id_js = json.dumps(button_id)
+    container_id_attr = html_module.escape(container_id, quote=True)
+    play_button_id_attr = html_module.escape(play_button_id, quote=True)
+    pause_button_id_attr = html_module.escape(pause_button_id, quote=True)
+    resume_button_id_attr = html_module.escape(resume_button_id, quote=True)
+
+    container_id_js = json.dumps(container_id)
+    play_button_id_js = json.dumps(play_button_id)
+    pause_button_id_js = json.dumps(pause_button_id)
+    resume_button_id_js = json.dumps(resume_button_id)
     text_payload = json.dumps(sanitized_text)
 
     st_html(
         Template(
             """
-<div class=\"takken-tts-button-container\">
-  <button id=\"$button_id\" type=\"button\">問題を読み上げる</button>
+<div id=\"$container_id\" class=\"takken-tts-button-container\">
+  <button id=\"$play_button_id\" type=\"button\">▶ 読み上げ</button>
+  <button id=\"$pause_button_id\" type=\"button\" class=\"secondary\">⏸ 一時停止</button>
+  <button id=\"$resume_button_id\" type=\"button\" class=\"secondary\">▶ 再開</button>
 </div>
 <script>
 (function() {
-    const buttonId = $button_id_js;
+    const containerId = $container_id_js;
+    const playButtonId = $play_button_id_js;
+    const pauseButtonId = $pause_button_id_js;
+    const resumeButtonId = $resume_button_id_js;
     const text = $text_payload;
     const doc = window.document;
-    const button = doc.getElementById(buttonId);
-    if (!button || button.dataset.speechBound === "true") {
+    const container = doc.getElementById(containerId);
+    if (!container || container.dataset.speechBound === "true") {
         return;
     }
-    button.dataset.speechBound = "true";
-    button.addEventListener("click", function() {
+    container.dataset.speechBound = "true";
+
+    const playButton = doc.getElementById(playButtonId);
+    const pauseButton = doc.getElementById(pauseButtonId);
+    const resumeButton = doc.getElementById(resumeButtonId);
+
+    function ensureSynth() {
         if (!window.speechSynthesis) {
             alert("音声読み上げはお使いのブラウザではサポートされていません。");
-            return;
+            [playButton, pauseButton, resumeButton].forEach(function(btn) {
+                if (btn) {
+                    btn.disabled = true;
+                }
+            });
+            return false;
         }
+        return true;
+    }
+
+    function speakFromStart() {
         const synth = window.speechSynthesis;
-        if (synth.speaking) {
-            synth.cancel();
-        }
-        if (!text) {
+        if (!synth || !text) {
             return;
+        }
+        if (synth.speaking || synth.paused) {
+            synth.cancel();
         }
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = "ja-JP";
         synth.speak(utterance);
-    });
+    }
+
+    if (playButton) {
+        playButton.addEventListener("click", function() {
+            if (!ensureSynth() || !text) {
+                return;
+            }
+            const synth = window.speechSynthesis;
+            if (synth.paused) {
+                synth.resume();
+                return;
+            }
+            speakFromStart();
+        });
+    }
+
+    if (pauseButton) {
+        pauseButton.addEventListener("click", function() {
+            if (!ensureSynth()) {
+                return;
+            }
+            const synth = window.speechSynthesis;
+            if (synth.speaking && !synth.paused) {
+                synth.pause();
+            }
+        });
+    }
+
+    if (resumeButton) {
+        resumeButton.addEventListener("click", function() {
+            if (!ensureSynth()) {
+                return;
+            }
+            const synth = window.speechSynthesis;
+            if (synth.paused) {
+                synth.resume();
+            } else if (!synth.speaking) {
+                speakFromStart();
+            }
+        });
+    }
 })();
 </script>
             """
         ).substitute(
-            button_id=button_id_attr,
-            button_id_js=button_id_js,
+            container_id=container_id_attr,
+            play_button_id=play_button_id_attr,
+            pause_button_id=pause_button_id_attr,
+            resume_button_id=resume_button_id_attr,
+            container_id_js=container_id_js,
+            play_button_id_js=play_button_id_js,
+            pause_button_id_js=pause_button_id_js,
+            resume_button_id_js=resume_button_id_js,
             text_payload=text_payload,
         ),
-        height=70,
+        height=120,
     )
 
 
