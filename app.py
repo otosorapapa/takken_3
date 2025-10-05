@@ -265,6 +265,12 @@ law_revision_questions_table = Table(
     Column("explanation", String),
     Column("difficulty", Integer, default=DIFFICULTY_DEFAULT),
     Column("tags", String),
+    Column("auto_summary", String),
+    Column("auto_cloze", String),
+    Column("review_status", String, default="pending"),
+    Column("reviewed_at", DateTime),
+    Column("generated_from", String),
+    Column("fetched_at", DateTime),
     Column("created_at", DateTime, server_default=func.now()),
 )
 
@@ -454,10 +460,10 @@ def ensure_schema_migrations(engine: Engine) -> None:
             schema_updates = {
                 "auto_summary": "TEXT",
                 "auto_cloze": "TEXT",
-                "review_status": "TEXT",
-                "reviewed_at": "TEXT",
+                "review_status": "TEXT DEFAULT 'pending'",
+                "reviewed_at": "DATETIME",
                 "generated_from": "TEXT",
-                "fetched_at": "TEXT",
+                "fetched_at": "DATETIME",
             }
             for column_name, sql_type in schema_updates.items():
                 if column_name not in lr_columns:
@@ -466,6 +472,13 @@ def ensure_schema_migrations(engine: Engine) -> None:
                             f"ALTER TABLE law_revision_questions ADD COLUMN {column_name} {sql_type}"
                         )
                     )
+                    if column_name == "review_status":
+                        conn.execute(
+                            text(
+                                "UPDATE law_revision_questions SET review_status = 'pending' "
+                                "WHERE review_status IS NULL"
+                            )
+                        )
 
         if "predicted_questions" in existing_tables:
             predicted_columns = {
