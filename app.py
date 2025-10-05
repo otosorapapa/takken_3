@@ -405,7 +405,9 @@ def inject_style(css: str, style_id: str) -> None:
     st_html(script, height=0)
 
 
-def render_question_read_aloud_button(question_id: str, html_text: str) -> None:
+def render_question_read_aloud_button(
+    question_id: str, html_text: str, choices: Optional[Sequence[str]] = None
+) -> None:
     """Render a read-aloud button for a question prompt."""
 
     inject_style(
@@ -439,6 +441,20 @@ def render_question_read_aloud_button(question_id: str, html_text: str) -> None:
 
     sanitized_text = re.sub(r"<[^>]+>", " ", html_text or "")
     sanitized_text = re.sub(r"\s+", " ", sanitized_text).strip()
+
+    choice_segments: List[str] = []
+    for choice in choices or []:
+        cleaned = re.sub(r"<[^>]+>", " ", choice or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            choice_segments.append(cleaned)
+
+    if choice_segments:
+        choices_text = "。".join(choice_segments)
+        if sanitized_text:
+            sanitized_text = f"{sanitized_text}。{choices_text}"
+        else:
+            sanitized_text = choices_text
 
     safe_question_id = re.sub(r"[^0-9A-Za-z_-]", "-", question_id or "question")
     if not safe_question_id:
@@ -6291,6 +6307,14 @@ def render_question_interaction(
         st.session_state[order_key] = base_order.copy()
     order = st.session_state.get(order_key, base_order)
     choice_labels = ["①", "②", "③", "④"]
+    ordered_choice_texts: List[str] = []
+    for actual_idx in order:
+        label_text = choices[actual_idx]
+        if pd.isna(label_text):
+            label_text = ""
+        choice_body = str(label_text).strip()
+        combined = f"{choice_labels[actual_idx]} {choice_body}".strip()
+        ordered_choice_texts.append(combined or choice_labels[actual_idx])
     label_value = str(row.get("label", "")).strip()
     if label_value:
         header = label_value
@@ -6319,7 +6343,9 @@ def render_question_interaction(
         raw_question_html = ""
     question_html = str(raw_question_html)
     st.markdown(question_html, unsafe_allow_html=True)
-    render_question_read_aloud_button(str(row.get("id", "")), question_html)
+    render_question_read_aloud_button(
+        str(row.get("id", "")), question_html, ordered_choice_texts
+    )
     selected_choice = st.session_state.get(selected_key)
     graded_selected_choice: Optional[int] = None
     correct_choice_idx: Optional[int] = None
@@ -6700,17 +6726,22 @@ def render_question_preview(row: pd.Series, db: Optional[DBManager] = None) -> N
     if pd.isna(question_text):
         question_text = ""
     question_html = str(question_text)
-    st.markdown(question_html, unsafe_allow_html=True)
-    render_question_read_aloud_button(str(row.get("id", "")), question_html)
     choice_labels = ["①", "②", "③", "④"]
+    ordered_choice_texts: List[str] = []
     for idx, label in enumerate(choice_labels, start=1):
         choice_text = row.get(f"choice{idx}")
         if pd.isna(choice_text):
-            continue
-        choice_text = str(choice_text)
-        if not choice_text.strip():
-            continue
-        st.markdown(f"{label} {choice_text}", unsafe_allow_html=True)
+            choice_text = ""
+        choice_value = str(choice_text).strip()
+        combined = f"{label} {choice_value}".strip()
+        if combined:
+            ordered_choice_texts.append(combined)
+    st.markdown(question_html, unsafe_allow_html=True)
+    render_question_read_aloud_button(
+        str(row.get("id", "")), question_html, ordered_choice_texts
+    )
+    for choice_text in ordered_choice_texts:
+        st.markdown(choice_text, unsafe_allow_html=True)
 
 
 def render_mock_exam(db: DBManager, df: pd.DataFrame) -> None:
