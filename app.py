@@ -4427,7 +4427,12 @@ def build_learning_plan(
             else pd.DataFrame()
         )
         due_count = int(len(due_slice))
-        due_focus = ", ".join(due_slice["category"].value_counts().head(2).index)
+        if not due_slice.empty and "category" in due_slice.columns:
+            due_focus = ", ".join(
+                due_slice["category"].value_counts().head(2).index
+            )
+        else:
+            due_focus = ""
         if not due_focus:
             due_focus = "総合"
 
